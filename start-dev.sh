@@ -22,31 +22,31 @@ if ! command -v redis-cli &>/dev/null; then
 fi
 
 # ─── Start Redis Node 1 ──────────────────────────────────
-if redis-cli -p "$REDIS_PORT_1" ping &>/dev/null; then
+if redis-cli -p "$REDIS_PORT_1" --no-auth-warning -t 2 ping &>/dev/null; then
     echo "[*] Redis node 1 already running on port $REDIS_PORT_1"
 else
     echo "[*] Starting redis node 1 on port $REDIS_PORT_1..."
     redis-server --port "$REDIS_PORT_1" --daemonize yes --loglevel warning
     sleep 1
-    if ! redis-cli -p "$REDIS_PORT_1" ping &>/dev/null; then
+    if ! redis-cli -p "$REDIS_PORT_1" -t 2 ping &>/dev/null; then
         echo "ERROR: Failed to start redis node 1"
         exit 1
     fi
-    echo "[*] Node 1 started (PID $(redis-cli -p "$REDIS_PORT_1" INFO server | grep process_id | tr -d '\r' | cut -d: -f2))"
+    echo "[*] Node 1 started (PID $(redis-cli -p "$REDIS_PORT_1" -t 2 INFO server | grep process_id | tr -d '\r' | cut -d: -f2))"
 fi
 
 # ─── Start Redis Node 2 ──────────────────────────────────
-if redis-cli -p "$REDIS_PORT_2" ping &>/dev/null; then
+if redis-cli -p "$REDIS_PORT_2" -t 2 ping &>/dev/null; then
     echo "[*] Redis node 2 already running on port $REDIS_PORT_2"
 else
     echo "[*] Starting redis node 2 on port $REDIS_PORT_2..."
     redis-server --port "$REDIS_PORT_2" --daemonize yes --loglevel warning
     sleep 1
-    if ! redis-cli -p "$REDIS_PORT_2" ping &>/dev/null; then
+    if ! redis-cli -p "$REDIS_PORT_2" -t 2 ping &>/dev/null; then
         echo "ERROR: Failed to start redis node 2"
         exit 1
     fi
-    echo "[*] Node 2 started (PID $(redis-cli -p "$REDIS_PORT_2" INFO server | grep process_id | tr -d '\r' | cut -d: -f2))"
+    echo "[*] Node 2 started (PID $(redis-cli -p "$REDIS_PORT_2" -t 2 INFO server | grep process_id | tr -d '\r' | cut -d: -f2))"
 fi
 
 CLI1="redis-cli -p $REDIS_PORT_1"
