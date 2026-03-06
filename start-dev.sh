@@ -1,9 +1,11 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-REDIS_PORT=6379
+REDIS_PORT_1=6379
+REDIS_PORT_2=6380
+HOSTS_FILE="/tmp/redis-tui-hosts.txt"
 
-echo "=== Redis TUI Dev Environment ==="
+echo "=== Redis TUI Dev Environment (Multi-Host) ==="
 
 # Check for redis-server
 if ! command -v redis-server &>/dev/null; then
@@ -19,36 +21,56 @@ if ! command -v redis-cli &>/dev/null; then
     exit 1
 fi
 
-# Start redis-server in background if not already running
-if redis-cli -p "$REDIS_PORT" ping &>/dev/null; then
-    echo "[*] Redis already running on port $REDIS_PORT"
+# ─── Start Redis Node 1 ──────────────────────────────────
+if redis-cli -p "$REDIS_PORT_1" ping &>/dev/null; then
+    echo "[*] Redis node 1 already running on port $REDIS_PORT_1"
 else
-    echo "[*] Starting redis-server on port $REDIS_PORT..."
-    redis-server --port "$REDIS_PORT" --daemonize yes --loglevel warning
+    echo "[*] Starting redis node 1 on port $REDIS_PORT_1..."
+    redis-server --port "$REDIS_PORT_1" --daemonize yes --loglevel warning
     sleep 1
-    if ! redis-cli -p "$REDIS_PORT" ping &>/dev/null; then
-        echo "ERROR: Failed to start redis-server"
+    if ! redis-cli -p "$REDIS_PORT_1" ping &>/dev/null; then
+        echo "ERROR: Failed to start redis node 1"
         exit 1
     fi
-    echo "[*] Redis started (PID $(redis-cli -p "$REDIS_PORT" INFO server | grep process_id | tr -d '\r' | cut -d: -f2))"
+    echo "[*] Node 1 started (PID $(redis-cli -p "$REDIS_PORT_1" INFO server | grep process_id | tr -d '\r' | cut -d: -f2))"
 fi
 
-CLI="redis-cli -p $REDIS_PORT"
+# ─── Start Redis Node 2 ──────────────────────────────────
+if redis-cli -p "$REDIS_PORT_2" ping &>/dev/null; then
+    echo "[*] Redis node 2 already running on port $REDIS_PORT_2"
+else
+    echo "[*] Starting redis node 2 on port $REDIS_PORT_2..."
+    redis-server --port "$REDIS_PORT_2" --daemonize yes --loglevel warning
+    sleep 1
+    if ! redis-cli -p "$REDIS_PORT_2" ping &>/dev/null; then
+        echo "ERROR: Failed to start redis node 2"
+        exit 1
+    fi
+    echo "[*] Node 2 started (PID $(redis-cli -p "$REDIS_PORT_2" INFO server | grep process_id | tr -d '\r' | cut -d: -f2))"
+fi
 
-echo "[*] Flushing existing data..."
-$CLI FLUSHALL >/dev/null
+CLI1="redis-cli -p $REDIS_PORT_1"
+CLI2="redis-cli -p $REDIS_PORT_2"
 
-echo "[*] Loading test data..."
+echo "[*] Flushing existing data on both nodes..."
+$CLI1 FLUSHALL >/dev/null
+$CLI2 FLUSHALL >/dev/null
+
+# ═══════════════════════════════════════════════════════════
+# NODE 1 DATA
+# ═══════════════════════════════════════════════════════════
+echo ""
+echo "=== Loading data on Node 1 (port $REDIS_PORT_1) ==="
 
 # ─── Strings ───────────────────────────────────────────────
-$CLI SET "string:greeting" "Hello, Redis TUI!" >/dev/null
-$CLI SET "string:json_config" '{"debug":true,"log_level":"info","max_connections":100,"features":["auth","caching","streams"]}' >/dev/null
-$CLI SET "string:counter" "42" >/dev/null
+$CLI1 SET "string:greeting" "Hello, Redis TUI!" >/dev/null
+$CLI1 SET "string:json_config" '{"debug":true,"log_level":"info","max_connections":100,"features":["auth","caching","streams"]}' >/dev/null
+$CLI1 SET "string:counter" "42" >/dev/null
 
-$CLI SET "string:ephemeral" "I expire in 300 seconds" >/dev/null
-$CLI EXPIRE "string:ephemeral" 300 >/dev/null
+$CLI1 SET "string:ephemeral" "I expire in 300 seconds" >/dev/null
+$CLI1 EXPIRE "string:ephemeral" 300 >/dev/null
 
-# ─── Two plain blobs (non-stream) ─────────────────────────
+# ─── Blobs ─────────────────────────────────────────────────
 echo "[*] Generating blobs..."
 
 # float32 blob - 1k elements, multi-freq sine
@@ -57,39 +79,34 @@ import struct, math, sys
 n = 1000
 vals = [math.sin(i*0.01) + 0.5*math.sin(i*0.05) + 0.25*math.sin(i*0.13) for i in range(n)]
 sys.stdout.buffer.write(struct.pack(f'<{n}f', *vals))
-" | $CLI -x SET "blob:float32_1k" >/dev/null
+" | $CLI1 -x SET "blob:float32_1k" >/dev/null
 echo "  blob:float32_1k"
 
 # random bytes blob for hex view
 python3 -c "
 import os, sys
 sys.stdout.buffer.write(os.urandom(256))
-" | $CLI -x SET "blob:random_256b" >/dev/null
+" | $CLI1 -x SET "blob:random_256b" >/dev/null
 echo "  blob:random_256b"
 
 # ─── Hashes ───────────────────────────────────────────────
-$CLI HSET "hash:user:1001" name "Alice" email "alice@example.com" age 30 role "admin" active "true" >/dev/null
-$CLI HSET "hash:server:config" host "0.0.0.0" port "8080" workers "4" timeout "30" tls "enabled" >/dev/null
-$CLI HSET "hash:metrics" cpu_pct "23.5" mem_mb "512" disk_gb "47.2" uptime_hrs "168" requests "984321" >/dev/null
+$CLI1 HSET "hash:user:1001" name "Alice" email "alice@example.com" age 30 role "admin" active "true" >/dev/null
+$CLI1 HSET "hash:server:config" host "0.0.0.0" port "8080" workers "4" timeout "30" tls "enabled" >/dev/null
 
 # ─── Lists ─────────────────────────────────────────────────
-$CLI RPUSH "list:task_queue" "send_email:user@test.com" "resize_image:photo_001.jpg" "generate_report:Q4_2025" >/dev/null
-$CLI RPUSH "list:numbers" 10 20 30 40 50 60 70 80 90 100 >/dev/null
+$CLI1 RPUSH "list:task_queue" "send_email:user@test.com" "resize_image:photo_001.jpg" "generate_report:Q4_2025" >/dev/null
+$CLI1 RPUSH "list:numbers" 10 20 30 40 50 60 70 80 90 100 >/dev/null
 
 # ─── Sets ──────────────────────────────────────────────────
-$CLI SADD "set:tags" "rust" "redis" "tui" "ratatui" "cli" "database" "visualization" >/dev/null
-$CLI SADD "set:blocked_ips" "192.168.1.100" "10.0.0.55" "172.16.0.99" >/dev/null
+$CLI1 SADD "set:tags" "rust" "redis" "tui" "ratatui" "cli" "database" "visualization" >/dev/null
 
 # ─── Sorted Sets ──────────────────────────────────────────
-$CLI ZADD "zset:leaderboard" 9500 "alice" 8700 "bob" 8200 "charlie" 7100 "diana" 6500 "eve" 5900 "frank" >/dev/null
-$CLI ZADD "zset:temperatures" -10.5 "jan" -2.3 "feb" 5.0 "mar" 12.8 "apr" 20.1 "may" 26.5 "jun" 30.2 "jul" 29.0 "aug" 22.4 "sep" 14.1 "oct" 5.5 "nov" -5.2 "dec" >/dev/null
+$CLI1 ZADD "zset:leaderboard" 9500 "alice" 8700 "bob" 8200 "charlie" 7100 "diana" 6500 "eve" 5900 "frank" >/dev/null
 
 # ─── Streams ──────────────────────────────────────────────
-
-# Text log stream
-$CLI XADD "stream:app_log" "*" level INFO msg "Application started" service "api" >/dev/null
-$CLI XADD "stream:app_log" "*" level WARN msg "High memory usage detected" service "worker" >/dev/null
-$CLI XADD "stream:app_log" "*" level ERROR msg "Database connection lost" service "api" >/dev/null
+$CLI1 XADD "stream:app_log" "*" level INFO msg "Application started" service "api" >/dev/null
+$CLI1 XADD "stream:app_log" "*" level WARN msg "High memory usage detected" service "worker" >/dev/null
+$CLI1 XADD "stream:app_log" "*" level ERROR msg "Database connection lost" service "api" >/dev/null
 
 # Small sensor stream (20 entries, float32 _data)
 echo "[*] Generating small sensor stream..."
@@ -104,18 +121,19 @@ accel_x = 0.01 * math.sin(t * 2.0)
 accel_y = 0.01 * math.cos(t * 2.0)
 accel_z = 9.81 + 0.005 * math.sin(t * 5.0)
 sys.stdout.buffer.write(struct.pack('<6f', temp, humidity, pressure, accel_x, accel_y, accel_z))
-" | $CLI -x XADD "stream:sensor_data" "*" sensor_id "env-001" _ >/dev/null
+" | $CLI1 -x XADD "stream:sensor_data" "*" sensor_id "env-001" _ >/dev/null
 done
 
-# ─── Big streams with binary _data ───────────────────────
-echo "[*] Generating big streams..."
+# ─── Big streams ──────────────────────────────────────────
+echo "[*] Generating big streams on node 1..."
 
 generate_big_stream() {
-    local key=$1
-    local count=$2
-    local dtype=$3
-    local fmt=$4
-    local values_per_entry=$5
+    local cli=$1
+    local key=$2
+    local count=$3
+    local dtype=$4
+    local fmt=$5
+    local values_per_entry=$6
 
     echo "  ${key} (${count} entries, ${dtype})..."
 
@@ -166,35 +184,94 @@ for i in range(count):
     sys.stdout.buffer.write(f'\${len(blob)}\r\n'.encode())
     sys.stdout.buffer.write(blob)
     sys.stdout.buffer.write(b'\r\n')
-" | $CLI --pipe >/dev/null 2>&1
+" | $cli --pipe >/dev/null 2>&1
 }
 
-# Args: key, num_entries, dtype, struct_fmt, values_per_entry
-# Key names reflect values_per_entry (what gets plotted per entry)
-generate_big_stream "stream:float32_500"  100  "float32" "<500f" 500
-generate_big_stream "stream:float64_200"  100  "float64" "<200d" 200
-generate_big_stream "stream:int16_1000"   100  "int16"   "<1000h" 1000
-generate_big_stream "stream:uint16_500"   100  "uint16"  "<500H" 500
-generate_big_stream "stream:uint8_2000"   100  "uint8"   "<2000B" 2000
-generate_big_stream "stream:int8_1000"    100  "int8"    "<1000b" 1000
-generate_big_stream "stream:int32_200"    100  "int32"   "<200i" 200
-generate_big_stream "stream:uint32_200"   100  "uint32"  "<200I" 200
+generate_big_stream "$CLI1" "stream:float32_500"  100  "float32" "<500f" 500
+generate_big_stream "$CLI1" "stream:int16_1000"   100  "int16"   "<1000h" 1000
+generate_big_stream "$CLI1" "stream:uint8_2000"   100  "uint8"   "<2000B" 2000
 
-# ─── Large streams for FFT stress testing ─────────────────
-echo "[*] Generating large streams..."
-generate_big_stream "stream:large_f32_10k"  50  "float32" "<10000f" 10000
-generate_big_stream "stream:large_i16_20k"  50  "int16"   "<20000h" 20000
+# Large streams for FFT stress testing
+echo "[*] Generating large streams on node 1..."
+generate_big_stream "$CLI1" "stream:large_f32_10k"  50  "float32" "<10000f" 10000
 
 # ─── Some keys in DB 1 ────────────────────────────────────
-$CLI -n 1 SET "db1:test_key" "This is in database 1" >/dev/null
-$CLI -n 1 HSET "db1:info" description "Alternate database" purpose "testing" >/dev/null
+$CLI1 -n 1 SET "db1:test_key" "This is in database 1 on node 1" >/dev/null
+$CLI1 -n 1 HSET "db1:info" description "DB 1 on node 1" purpose "testing" >/dev/null
+
+
+# ═══════════════════════════════════════════════════════════
+# NODE 2 DATA
+# ═══════════════════════════════════════════════════════════
+echo ""
+echo "=== Loading data on Node 2 (port $REDIS_PORT_2) ==="
+
+# ─── Strings (unique to node 2) ──────────────────────────
+$CLI2 SET "string:node2_greeting" "Hello from Node 2!" >/dev/null
+$CLI2 SET "string:node2_config" '{"region":"us-east","replica":true}' >/dev/null
+
+# ─── Hashes (unique to node 2) ──────────────────────────
+$CLI2 HSET "hash:user:2001" name "Bob" email "bob@example.com" age 25 role "user" active "true" >/dev/null
+$CLI2 HSET "hash:metrics" cpu_pct "55.2" mem_mb "1024" disk_gb "80.1" uptime_hrs "720" requests "2541098" >/dev/null
+
+# ─── Lists (unique to node 2) ────────────────────────────
+$CLI2 RPUSH "list:events" "deploy:v2.1.0" "rollback:v2.0.9" "scale_up:workers=8" >/dev/null
+
+# ─── Sets (unique to node 2) ─────────────────────────────
+$CLI2 SADD "set:blocked_ips" "192.168.1.100" "10.0.0.55" "172.16.0.99" >/dev/null
+
+# ─── Sorted Sets (unique to node 2) ─────────────────────
+$CLI2 ZADD "zset:temperatures" -10.5 "jan" -2.3 "feb" 5.0 "mar" 12.8 "apr" 20.1 "may" 26.5 "jun" 30.2 "jul" 29.0 "aug" 22.4 "sep" 14.1 "oct" 5.5 "nov" -5.2 "dec" >/dev/null
+
+# ─── Streams (unique to node 2) ─────────────────────────
+$CLI2 XADD "stream:node2_log" "*" level INFO msg "Node 2 started" service "replica" >/dev/null
+$CLI2 XADD "stream:node2_log" "*" level INFO msg "Sync complete" service "replica" >/dev/null
+
+echo "[*] Generating big streams on node 2..."
+generate_big_stream "$CLI2" "stream:float64_200"  100  "float64" "<200d" 200
+generate_big_stream "$CLI2" "stream:uint16_500"   100  "uint16"  "<500H" 500
+generate_big_stream "$CLI2" "stream:int8_1000"    100  "int8"    "<1000b" 1000
+generate_big_stream "$CLI2" "stream:int32_200"    100  "int32"   "<200i" 200
+generate_big_stream "$CLI2" "stream:uint32_200"   100  "uint32"  "<200I" 200
+
+echo "[*] Generating large streams on node 2..."
+generate_big_stream "$CLI2" "stream:large_i16_20k"  50  "int16"   "<20000h" 20000
+
+# ─── COLLISION KEYS (exist on BOTH nodes) ────────────────
+echo ""
+echo "=== Creating collision keys (on both nodes) ==="
+$CLI1 SET "shared:collision_test" "Value from Node 1 (port $REDIS_PORT_1)" >/dev/null
+$CLI2 SET "shared:collision_test" "Value from Node 2 (port $REDIS_PORT_2)" >/dev/null
+echo "  shared:collision_test"
+
+$CLI1 HSET "shared:status" node "node1" status "primary" uptime "168h" >/dev/null
+$CLI2 HSET "shared:status" node "node2" status "replica" uptime "720h" >/dev/null
+echo "  shared:status"
+
+$CLI1 SADD "shared:active_users" "alice" "charlie" "eve" >/dev/null
+$CLI2 SADD "shared:active_users" "bob" "diana" "frank" >/dev/null
+echo "  shared:active_users"
+
+# ─── DB 1 on node 2 ──────────────────────────────────────
+$CLI2 -n 1 SET "db1:node2_key" "This is in database 1 on node 2" >/dev/null
+$CLI2 -n 1 HSET "db1:info" description "DB 1 on node 2" purpose "collision test" >/dev/null
+
+# ─── Write hosts file ────────────────────────────────────
+cat > "$HOSTS_FILE" <<EOF
+# Redis TUI multi-host dev config
+redis://127.0.0.1:${REDIS_PORT_1}/0
+redis://127.0.0.1:${REDIS_PORT_2}/0
+EOF
 
 # ─── Summary ──────────────────────────────────────────────
 echo ""
 echo "=== Test Data Loaded ==="
-echo "Total keys in DB 0: $($CLI DBSIZE | tr -d '\r')"
+echo "Node 1 (port $REDIS_PORT_1) keys in DB 0: $($CLI1 DBSIZE | tr -d '\r')"
+echo "Node 2 (port $REDIS_PORT_2) keys in DB 0: $($CLI2 DBSIZE | tr -d '\r')"
+echo "Collision keys: shared:collision_test, shared:status, shared:active_users"
+echo "Hosts file: $HOSTS_FILE"
 echo ""
-echo "=== Starting Redis TUI ==="
+echo "=== Starting Redis TUI (multi-host) ==="
 echo ""
 
-cargo run
+cargo run -- --hosts-file "$HOSTS_FILE"

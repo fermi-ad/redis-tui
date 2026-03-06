@@ -1,5 +1,5 @@
 use crate::data::{DataType, Endianness, decode_blob, encode_values, is_binary};
-use crate::redis_client::{KeyInfo, RedisClient, RedisValue, StreamEntry};
+use crate::redis_client::{KeyInfo, MultiRedisClient, RedisValue, StreamEntry};
 use ratatui::widgets::ListState;
 use rustfft::{FftPlanner, num_complex::Complex};
 use std::sync::mpsc;
@@ -137,6 +137,12 @@ pub struct App {
     pub db_size: i64,
     pub connected: bool,
     pub status_message: String,
+    pub host_count: usize,
+    pub hosts_connected: usize,
+    /// Key collisions: (key_name, list_of_host_labels)
+    pub collisions: Vec<(String, Vec<String>)>,
+    /// Host label for the currently selected key
+    pub current_key_host: Option<String>,
 
     // Confirmation dialog
     pub confirm_action: Option<String>,
@@ -221,6 +227,10 @@ impl App {
             db_size: 0,
             connected: false,
             status_message: String::from("Connecting..."),
+            host_count: 1,
+            hosts_connected: 0,
+            collisions: Vec::new(),
+            current_key_host: None,
 
             confirm_action: None,
 
@@ -240,7 +250,7 @@ impl App {
         }
     }
 
-    pub fn refresh_keys(&mut self, client: &mut RedisClient) {
+    pub fn refresh_keys(&mut self, client: &mut MultiRedisClient) {
         match client.scan_keys(&self.filter_pattern) {
             Ok(keys) => {
                 // Get types for each key
@@ -254,7 +264,20 @@ impl App {
                 }
                 self.keys = keys;
                 self.key_types = types;
-                self.status_message = format!("Loaded {} keys", self.keys.len());
+
+                // Track collisions
+                self.collisions = client.collisions.clone();
+                let collision_count = self.collisions.len();
+
+                if collision_count > 0 {
+                    self.status_message = format!(
+                        "Loaded {} keys ({} collisions!)",
+                        self.keys.len(),
+                        collision_count
+                    );
+                } else {
+                    self.status_message = format!("Loaded {} keys", self.keys.len());
+                }
 
                 // Preserve selection if possible
                 if self.keys.is_empty() {
@@ -273,13 +296,27 @@ impl App {
         }
 
         self.db_size = client.get_db_size().unwrap_or(0);
+        self.host_count = client.host_count();
+        self.hosts_connected = client.num_connected();
         self.connected = client.is_connected();
     }
 
-    pub fn load_selected_value(&mut self, client: &mut RedisClient) {
+    pub fn load_selected_value(&mut self, client: &mut MultiRedisClient) {
         if let Some(idx) = self.key_list_state.selected() {
             if idx < self.keys.len() {
                 let key = &self.keys[idx].clone();
+
+                // Track which host this key belongs to
+                if client.host_count() > 1 {
+                    self.current_key_host = Some(client.host_label_for_key(key).to_string());
+                } else {
+                    self.current_key_host = None;
+                }
+
+                // Warn if this is a collision key
+                if client.is_collision(key) {
+                    self.status_message = format!("WARNING: '{}' exists on multiple hosts!", key);
+                }
 
                 match client.get_key_info(key) {
                     Ok(info) => self.current_key_info = Some(info),
@@ -340,7 +377,7 @@ impl App {
 
     /// Reload the current value without resetting scroll.
     #[allow(dead_code)]
-    pub fn refresh_selected_value(&mut self, client: &mut RedisClient) {
+    pub fn refresh_selected_value(&mut self, client: &mut MultiRedisClient) {
         if let Some(idx) = self.key_list_state.selected() {
             if idx < self.keys.len() {
                 let key = self.keys[idx].clone();
@@ -950,7 +987,7 @@ impl App {
         self.input_mode = InputMode::Edit;
     }
 
-    pub fn execute_edit(&mut self, client: &mut RedisClient) -> Result<(), String> {
+    pub fn execute_edit(&mut self, client: &mut MultiRedisClient) -> Result<(), String> {
         let op = match &self.edit_operation {
             Some(op) => op.clone(),
             None => return Err("No operation".to_string()),

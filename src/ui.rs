@@ -108,6 +108,12 @@ fn draw_key_list(frame: &mut Frame, app: &mut App, area: Rect) {
         app.keys.len()
     );
 
+    let collision_keys: std::collections::HashSet<&str> = app
+        .collisions
+        .iter()
+        .map(|(k, _)| k.as_str())
+        .collect();
+
     let items: Vec<ListItem> = app
         .keys
         .iter()
@@ -119,14 +125,19 @@ fn draw_key_list(frame: &mut Frame, app: &mut App, area: Rect) {
                 ("???", Color::DarkGray)
             };
 
-            let line = Line::from(vec![
+            let is_collision = collision_keys.contains(key.as_str());
+            let mut spans = vec![
                 Span::styled(
                     format!("{:<6}", type_badge.0),
                     Style::default().fg(type_badge.1),
                 ),
-                Span::raw(key),
-            ]);
-            ListItem::new(line)
+            ];
+            if is_collision {
+                spans.push(Span::styled("! ", Style::default().fg(Color::Yellow)));
+            }
+            spans.push(Span::raw(key.as_str()));
+
+            ListItem::new(Line::from(spans))
         })
         .collect();
 
@@ -498,23 +509,42 @@ fn draw_status_bar(frame: &mut Frame, app: &App, area: Rect) {
     } else {
         Color::Red
     };
-    let status_text = if app.connected {
-        "Connected"
+
+    let mut spans = vec![Span::raw(" ")];
+
+    if app.host_count > 1 {
+        let conn_text = format!("{}/{} hosts", app.hosts_connected, app.host_count);
+        spans.push(Span::styled(conn_text, Style::default().fg(status_color)));
     } else {
-        "Disconnected"
-    };
+        let status_text = if app.connected { "Connected" } else { "Disconnected" };
+        spans.push(Span::styled(status_text, Style::default().fg(status_color)));
+    }
 
-    let line = Line::from(vec![
-        Span::raw(" "),
-        Span::styled(status_text, Style::default().fg(status_color)),
-        Span::raw(" | "),
-        Span::raw(format!("DB: {} ", app.db)),
-        Span::raw("| "),
-        Span::raw(format!("Keys: {} ", app.db_size)),
-        Span::raw("| "),
-        Span::styled(&app.status_message, Style::default().fg(Color::DarkGray)),
-    ]);
+    spans.push(Span::raw(" | "));
+    spans.push(Span::raw(format!("DB: {} ", app.db)));
+    spans.push(Span::raw("| "));
+    spans.push(Span::raw(format!("Keys: {} ", app.db_size)));
 
+    if !app.collisions.is_empty() {
+        spans.push(Span::raw("| "));
+        spans.push(Span::styled(
+            format!("{} collisions ", app.collisions.len()),
+            Style::default().fg(Color::Yellow),
+        ));
+    }
+
+    if let Some(ref host) = app.current_key_host {
+        spans.push(Span::raw("| "));
+        spans.push(Span::styled(
+            format!("@{} ", host),
+            Style::default().fg(Color::Cyan),
+        ));
+    }
+
+    spans.push(Span::raw("| "));
+    spans.push(Span::styled(&app.status_message, Style::default().fg(Color::DarkGray)));
+
+    let line = Line::from(spans);
     let bar = Paragraph::new(line).style(Style::default().bg(Color::Black));
     frame.render_widget(bar, area);
 }

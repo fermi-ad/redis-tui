@@ -12,7 +12,7 @@ use crossterm::{
     ExecutableCommand,
 };
 use ratatui::prelude::*;
-use redis_client::{RedisClient, StreamEntry};
+use redis_client::{MultiRedisClient, RedisClient, StreamEntry};
 use std::io;
 use std::sync::mpsc;
 use std::sync::{Arc, atomic::{AtomicBool, Ordering}};
@@ -40,6 +40,11 @@ struct Args {
     /// Full Redis URL (overrides host/port/password/db)
     #[arg(short, long)]
     url: Option<String>,
+
+    /// Path to hosts file (one Redis URL per line, # for comments).
+    /// Connects to all listed hosts and aggregates keys.
+    #[arg(long)]
+    hosts_file: Option<String>,
 }
 
 impl Args {
@@ -58,13 +63,54 @@ impl Args {
     }
 }
 
+/// Parse a hosts file. Each line is a Redis URL. Lines starting with # are comments.
+/// Blank lines are skipped. Returns (label, url) pairs.
+fn parse_hosts_file(path: &str) -> Result<Vec<(String, String)>> {
+    let content = std::fs::read_to_string(path)
+        .with_context(|| format!("Failed to read hosts file: {}", path))?;
+
+    let mut hosts = Vec::new();
+    for (i, line) in content.lines().enumerate() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            continue;
+        }
+        // Use the host:port portion as a label, or fallback to line number
+        let label = trimmed
+            .strip_prefix("redis://")
+            .and_then(|s| s.split('/').next())
+            .map(|s| {
+                // Remove auth portion for label
+                if let Some(at_pos) = s.rfind('@') {
+                    s[at_pos + 1..].to_string()
+                } else {
+                    s.to_string()
+                }
+            })
+            .unwrap_or_else(|| format!("host-{}", i + 1));
+        hosts.push((label, trimmed.to_string()));
+    }
+
+    if hosts.is_empty() {
+        anyhow::bail!("Hosts file '{}' contains no valid URLs", path);
+    }
+
+    Ok(hosts)
+}
+
 fn main() -> Result<()> {
     let args = Args::parse();
-    let url = args.redis_url();
 
-    // Connect to Redis
-    let mut client = RedisClient::connect(&url)
-        .with_context(|| format!("Failed to connect to Redis at {}", url))?;
+    // Connect to Redis (single or multi-host)
+    let mut client = if let Some(ref hosts_path) = args.hosts_file {
+        let hosts = parse_hosts_file(hosts_path)?;
+        eprintln!("Connecting to {} hosts...", hosts.len());
+        MultiRedisClient::from_urls(&hosts)?
+    } else {
+        let url = args.redis_url();
+        MultiRedisClient::from_single(&url)
+            .with_context(|| format!("Failed to connect to Redis at {}", url))?
+    };
 
     // Set up terminal
     enable_raw_mode().context("Failed to enable raw mode")?;
@@ -78,7 +124,7 @@ fn main() -> Result<()> {
     let mut terminal = Terminal::new(backend).context("Failed to create terminal")?;
 
     // Run app
-    let result = run_app(&mut terminal, &mut client, &url);
+    let result = run_app(&mut terminal, &mut client);
 
     // Restore terminal
     disable_raw_mode().context("Failed to disable raw mode")?;
@@ -218,11 +264,11 @@ impl Drop for SignalGenerator {
 
 fn run_app(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
-    client: &mut RedisClient,
-    redis_url: &str,
+    client: &mut MultiRedisClient,
 ) -> Result<()> {
     let mut app = App::new();
     app.db = client.db;
+    app.host_count = client.host_count();
 
     // Initial key load
     app.refresh_keys(client);
@@ -285,7 +331,8 @@ fn run_app(
                                 entries_per_sec: app.signal_gen_fields[4].1.trim().parse().unwrap_or(10.0),
                             };
                             if let Some(k) = app.selected_key_name().map(|s| s.to_string()) {
-                                signal_generator = SignalGenerator::start(redis_url, &k, app.db, config);
+                                let key_url = client.url_for_key(&k).to_string();
+                                signal_generator = SignalGenerator::start(&key_url, &k, app.db, config);
                                 if signal_generator.is_some() {
                                     app.status_message = format!("Signal gen: running on '{}'", k);
                                 } else {
@@ -318,8 +365,9 @@ fn run_app(
                                     app.selected_key_name().map(|s| s.to_string()),
                                     app.last_stream_id.clone(),
                                 ) {
+                                    let key_url = client.url_for_key(&k).to_string();
                                     stream_listener =
-                                        StreamListener::start(redis_url, &k, &lid, app.db);
+                                        StreamListener::start(&key_url, &k, &lid, app.db);
                                     if stream_listener.is_some() {
                                         app.status_message =
                                             format!("Stream: listening on '{}'", k);
@@ -382,7 +430,7 @@ fn run_app(
 
 fn handle_normal_input(
     app: &mut App,
-    client: &mut RedisClient,
+    client: &mut MultiRedisClient,
     code: KeyCode,
     modifiers: KeyModifiers,
 ) {
@@ -529,7 +577,7 @@ fn handle_normal_input(
     }
 }
 
-fn handle_filter_input(app: &mut App, client: &mut RedisClient, code: KeyCode) {
+fn handle_filter_input(app: &mut App, client: &mut MultiRedisClient, code: KeyCode) {
     match code {
         KeyCode::Enter => {
             app.apply_filter();
@@ -550,7 +598,7 @@ fn handle_filter_input(app: &mut App, client: &mut RedisClient, code: KeyCode) {
     }
 }
 
-fn handle_confirm_input(app: &mut App, client: &mut RedisClient, code: KeyCode) {
+fn handle_confirm_input(app: &mut App, client: &mut MultiRedisClient, code: KeyCode) {
     match code {
         KeyCode::Char('y') | KeyCode::Char('Y') => {
             // Execute the confirmed action
@@ -583,7 +631,7 @@ fn handle_confirm_input(app: &mut App, client: &mut RedisClient, code: KeyCode) 
 
 fn handle_edit_input(
     app: &mut App,
-    client: &mut RedisClient,
+    client: &mut MultiRedisClient,
     code: KeyCode,
     modifiers: KeyModifiers,
 ) {

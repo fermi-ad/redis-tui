@@ -449,3 +449,226 @@ impl RedisClient {
         Ok(())
     }
 }
+
+/// Wraps one or more RedisClient connections, aggregating keys from all hosts.
+/// Tracks which host owns each key so operations route to the correct connection.
+pub struct MultiRedisClient {
+    pub clients: Vec<RedisClient>,
+    pub labels: Vec<String>,
+    /// Maps key name -> index into `clients`. For collisions, first host wins.
+    pub key_owner: HashMap<String, usize>,
+    /// Keys that exist on multiple hosts (collision warnings).
+    pub collisions: Vec<(String, Vec<String>)>,
+    pub db: i64,
+}
+
+impl MultiRedisClient {
+    /// Create from a single URL (backwards-compatible).
+    pub fn from_single(url: &str) -> Result<Self> {
+        let client = RedisClient::connect(url)?;
+        let db = client.db;
+        Ok(Self {
+            labels: vec![url.to_string()],
+            clients: vec![client],
+            key_owner: HashMap::new(),
+            collisions: Vec::new(),
+            db,
+        })
+    }
+
+    /// Create from multiple URLs.
+    pub fn from_urls(urls: &[(String, String)]) -> Result<Self> {
+        let mut clients = Vec::new();
+        let mut labels = Vec::new();
+        for (label, url) in urls {
+            let client = RedisClient::connect(url)
+                .with_context(|| format!("Failed to connect to {} ({})", label, url))?;
+            clients.push(client);
+            labels.push(label.clone());
+        }
+        Ok(Self {
+            clients,
+            labels,
+            key_owner: HashMap::new(),
+            collisions: Vec::new(),
+            db: 0,
+        })
+    }
+
+    pub fn select_db(&mut self, db: i64) -> Result<()> {
+        for client in &mut self.clients {
+            client.select_db(db)?;
+        }
+        self.db = db;
+        Ok(())
+    }
+
+    pub fn scan_keys(&mut self, pattern: &str) -> Result<Vec<String>> {
+        let mut all_keys: Vec<String> = Vec::new();
+        let mut seen: HashMap<String, Vec<usize>> = HashMap::new();
+        self.key_owner.clear();
+        self.collisions.clear();
+
+        for (idx, client) in self.clients.iter_mut().enumerate() {
+            match client.scan_keys(pattern) {
+                Ok(keys) => {
+                    for key in keys {
+                        seen.entry(key.clone()).or_default().push(idx);
+                        if !self.key_owner.contains_key(&key) {
+                            self.key_owner.insert(key.clone(), idx);
+                            all_keys.push(key);
+                        }
+                    }
+                }
+                Err(e) => {
+                    // Log error but continue with other hosts
+                    eprintln!("Error scanning keys on {}: {}", self.labels[idx], e);
+                }
+            }
+        }
+
+        // Record collisions
+        for (key, hosts) in &seen {
+            if hosts.len() > 1 {
+                let host_names: Vec<String> = hosts.iter().map(|&i| self.labels[i].clone()).collect();
+                self.collisions.push((key.clone(), host_names));
+            }
+        }
+        self.collisions.sort_by(|a, b| a.0.cmp(&b.0));
+
+        all_keys.sort();
+        Ok(all_keys)
+    }
+
+    /// Get the client that owns a key. Falls back to first client.
+    fn client_for_key(&mut self, key: &str) -> &mut RedisClient {
+        let idx = self.key_owner.get(key).copied().unwrap_or(0);
+        &mut self.clients[idx]
+    }
+
+    /// Get the host index for a key.
+    pub fn host_index_for_key(&self, key: &str) -> usize {
+        self.key_owner.get(key).copied().unwrap_or(0)
+    }
+
+    /// Get the host label for a key.
+    pub fn host_label_for_key(&self, key: &str) -> &str {
+        let idx = self.host_index_for_key(key);
+        &self.labels[idx]
+    }
+
+    /// Check if a key is a collision (exists on multiple hosts).
+    pub fn is_collision(&self, key: &str) -> bool {
+        self.collisions.iter().any(|(k, _)| k == key)
+    }
+
+    pub fn get_key_info(&mut self, key: &str) -> Result<KeyInfo> {
+        self.client_for_key(key).get_key_info(key)
+    }
+
+    pub fn get_value(&mut self, key: &str) -> Result<RedisValue> {
+        self.client_for_key(key).get_value(key)
+    }
+
+    pub fn delete_key(&mut self, key: &str) -> Result<()> {
+        self.client_for_key(key).delete_key(key)
+    }
+
+    pub fn get_db_size(&mut self) -> Result<i64> {
+        let mut total: i64 = 0;
+        for client in &mut self.clients {
+            total += client.get_db_size().unwrap_or(0);
+        }
+        Ok(total)
+    }
+
+    pub fn is_connected(&mut self) -> bool {
+        self.clients.iter_mut().any(|c| c.is_connected())
+    }
+
+    pub fn num_connected(&mut self) -> usize {
+        self.clients.iter_mut().filter(|c| c.connection.is_open()).count()
+    }
+
+    // ─── Write operations (route to key owner) ────────────────
+
+    pub fn set_string(&mut self, key: &str, value: &str) -> Result<()> {
+        self.client_for_key(key).set_string(key, value)
+    }
+
+    pub fn set_bytes(&mut self, key: &str, value: &[u8]) -> Result<()> {
+        self.client_for_key(key).set_bytes(key, value)
+    }
+
+    pub fn hset(&mut self, key: &str, field: &str, value: &str) -> Result<()> {
+        self.client_for_key(key).hset(key, field, value)
+    }
+
+    pub fn hset_bytes(&mut self, key: &str, field: &str, value: &[u8]) -> Result<()> {
+        self.client_for_key(key).hset_bytes(key, field, value)
+    }
+
+    pub fn rpush(&mut self, key: &str, value: &str) -> Result<()> {
+        self.client_for_key(key).rpush(key, value)
+    }
+
+    pub fn rpush_bytes(&mut self, key: &str, value: &[u8]) -> Result<()> {
+        self.client_for_key(key).rpush_bytes(key, value)
+    }
+
+    pub fn lset(&mut self, key: &str, index: i64, value: &str) -> Result<()> {
+        self.client_for_key(key).lset(key, index, value)
+    }
+
+    pub fn lset_bytes(&mut self, key: &str, index: i64, value: &[u8]) -> Result<()> {
+        self.client_for_key(key).lset_bytes(key, index, value)
+    }
+
+    pub fn sadd(&mut self, key: &str, member: &str) -> Result<()> {
+        self.client_for_key(key).sadd(key, member)
+    }
+
+    pub fn sadd_bytes(&mut self, key: &str, member: &[u8]) -> Result<()> {
+        self.client_for_key(key).sadd_bytes(key, member)
+    }
+
+    pub fn zadd(&mut self, key: &str, score: f64, member: &str) -> Result<()> {
+        self.client_for_key(key).zadd(key, score, member)
+    }
+
+    pub fn zadd_bytes(&mut self, key: &str, score: f64, member: &[u8]) -> Result<()> {
+        self.client_for_key(key).zadd_bytes(key, score, member)
+    }
+
+    pub fn xadd(&mut self, key: &str, field: &str, value: &str) -> Result<()> {
+        self.client_for_key(key).xadd(key, field, value)
+    }
+
+    pub fn xadd_binary(&mut self, key: &str, field: &str, value: &[u8]) -> Result<()> {
+        self.client_for_key(key).xadd_binary(key, field, value)
+    }
+
+    pub fn set_ttl(&mut self, key: &str, ttl: i64) -> Result<()> {
+        self.client_for_key(key).set_ttl(key, ttl)
+    }
+
+    pub fn rename_key(&mut self, old_key: &str, new_key: &str) -> Result<()> {
+        self.client_for_key(old_key).rename_key(old_key, new_key)
+    }
+
+    /// Get the first URL (used for stream listener/signal generator connections).
+    #[allow(dead_code)]
+    pub fn first_url(&self) -> &str {
+        &self.clients[0].url
+    }
+
+    /// Get the URL for the host that owns a key.
+    pub fn url_for_key(&self, key: &str) -> &str {
+        let idx = self.host_index_for_key(key);
+        &self.clients[idx].url
+    }
+
+    pub fn host_count(&self) -> usize {
+        self.clients.len()
+    }
+}
