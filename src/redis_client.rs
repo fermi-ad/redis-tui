@@ -43,7 +43,7 @@ impl RedisClient {
         let client = redis::Client::open(url)
             .with_context(|| format!("Failed to create Redis client for {}", url))?;
         let connection = client
-            .get_connection()
+            .get_connection_with_timeout(std::time::Duration::from_secs(10))
             .with_context(|| format!("Failed to connect to {}", url))?;
 
         // Parse db number from URL (e.g., redis://host:port/3)
