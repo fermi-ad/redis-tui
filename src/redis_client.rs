@@ -476,19 +476,81 @@ impl MultiRedisClient {
         })
     }
 
-    /// Create from multiple URLs.
+    /// Create from multiple URLs with retry logic for hosts that aren't ready yet.
     pub fn from_urls(urls: &[(String, String)]) -> Result<Self> {
         let mut clients = Vec::new();
         let mut labels = Vec::new();
-        for (label, url) in urls {
-            let client = RedisClient::connect(url)
-                .with_context(|| format!("Failed to connect to {} ({})", label, url))?;
-            clients.push(client);
-            labels.push(label.clone());
+        let max_retries = 15;
+        let retry_delay = std::time::Duration::from_secs(2);
+
+        // First pass: try to connect to all hosts, track failures
+        let mut pending: Vec<(usize, String, String)> = Vec::new();
+        for (i, (label, url)) in urls.iter().enumerate() {
+            match RedisClient::connect(url) {
+                Ok(client) => {
+                    clients.push(Some(client));
+                    labels.push(label.clone());
+                }
+                Err(_) => {
+                    clients.push(None);
+                    labels.push(label.clone());
+                    pending.push((i, label.clone(), url.clone()));
+                }
+            }
         }
+
+        // Retry failed connections
+        let mut attempt = 0;
+        while !pending.is_empty() && attempt < max_retries {
+            attempt += 1;
+            eprintln!(
+                "Retrying {} host(s) (attempt {}/{})...",
+                pending.len(),
+                attempt,
+                max_retries
+            );
+            std::thread::sleep(retry_delay);
+
+            pending.retain(|(i, label, url)| {
+                match RedisClient::connect(url) {
+                    Ok(client) => {
+                        eprintln!("  Connected to {}", label);
+                        clients[*i] = Some(client);
+                        false // remove from pending
+                    }
+                    Err(_) => true, // keep retrying
+                }
+            });
+        }
+
+        // Collect results, skip hosts that never connected
+        let mut final_clients = Vec::new();
+        let mut final_labels = Vec::new();
+        let mut failed = Vec::new();
+        for (i, opt) in clients.into_iter().enumerate() {
+            if let Some(client) = opt {
+                final_clients.push(client);
+                final_labels.push(labels[i].clone());
+            } else {
+                failed.push(labels[i].clone());
+            }
+        }
+
+        if !failed.is_empty() {
+            eprintln!(
+                "Warning: could not connect to {} host(s): {}",
+                failed.len(),
+                failed.join(", ")
+            );
+        }
+
+        if final_clients.is_empty() {
+            anyhow::bail!("Failed to connect to any Redis host");
+        }
+
         Ok(Self {
-            clients,
-            labels,
+            clients: final_clients,
+            labels: final_labels,
             key_owner: HashMap::new(),
             collisions: Vec::new(),
             db: 0,
