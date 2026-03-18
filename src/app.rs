@@ -125,6 +125,7 @@ pub struct App {
     pub fft_computing: bool,
     pub fft_rx: Option<mpsc::Receiver<Vec<f64>>>,
     pub fft_handle: Option<std::thread::JoinHandle<()>>,
+    pub fft_dirty: bool, // true if plot_data changed while FFT was in flight
     pub fft_auto_limits: bool,
     pub fft_y_min: f64,
     pub fft_y_max: f64,
@@ -224,6 +225,7 @@ impl App {
             fft_computing: false,
             fft_rx: None,
             fft_handle: None,
+            fft_dirty: false,
             fft_auto_limits: true,
             fft_y_min: 0.0,
             fft_y_max: 1.0,
@@ -637,9 +639,11 @@ impl App {
         } else {
             self.fft_data.clear();
             self.fft_computing = false;
+            self.fft_dirty = false;
             self.fft_rx = None;
+            // Non-blocking join — avoid stalling the UI thread
             if let Some(h) = self.fft_handle.take() {
-                let _ = h.join();
+                std::thread::spawn(move || { let _ = h.join(); });
             }
         }
     }
@@ -648,17 +652,21 @@ impl App {
         if self.plot_data.is_empty() {
             self.fft_data.clear();
             self.fft_computing = false;
+            self.fft_dirty = false;
             self.fft_rx = None;
+            // Non-blocking join — avoid stalling the UI thread
             if let Some(h) = self.fft_handle.take() {
-                let _ = h.join();
+                std::thread::spawn(move || { let _ = h.join(); });
             }
             return;
         }
-        // Skip if an FFT is already in flight — the next data update after
-        // poll_fft() clears the flag will spawn a fresh computation.
+        // If an FFT is already in flight, mark dirty so poll_fft()
+        // re-triggers a computation with the latest data once it completes.
         if self.fft_computing {
+            self.fft_dirty = true;
             return;
         }
+        self.fft_dirty = false;
         let data = self.plot_data.clone();
         let (tx, rx) = mpsc::channel();
         self.fft_rx = Some(rx);
@@ -680,6 +688,10 @@ impl App {
                     self.fft_rx = None;
                     if let Some(h) = self.fft_handle.take() {
                         let _ = h.join();
+                    }
+                    // Re-trigger if data changed while we were computing
+                    if self.fft_dirty {
+                        self.compute_fft();
                     }
                 }
                 Err(mpsc::TryRecvError::Disconnected) => {
