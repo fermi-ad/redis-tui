@@ -1065,7 +1065,7 @@ fn draw_crosshair(
     data_x: f64, data_y: f64,
     x_lo: f64, x_hi: f64, y_lo: f64, y_hi: f64,
 ) {
-    if cw == 0 || ch == 0 || x_hi <= x_lo || y_hi <= y_lo {
+    if cw <= 1 || ch <= 1 || x_hi <= x_lo || y_hi <= y_lo {
         return;
     }
     let frac_x = (data_x - x_lo) / (x_hi - x_lo);
@@ -1075,37 +1075,36 @@ fn draw_crosshair(
         return;
     }
 
-    let px = cx + (frac_x * cw as f64) as u16;
-    let py = cy + ((1.0 - frac_y) * ch as f64) as u16;
+    let buf_area = frame.area();
+
+    // Clamp to stay within the chart area (cw-1 / ch-1 prevents off-by-one at boundary)
+    let px = cx + (frac_x * (cw - 1) as f64) as u16;
+    let py = cy + ((1.0 - frac_y) * (ch - 1) as f64) as u16;
 
     let crosshair_style = Style::default().fg(Color::White);
 
     // Vertical line (sparse dashes)
     for y in cy..cy + ch {
-        if y != py && y % 2 == 0 {
-            if px < cx + cw {
-                frame.render_widget(
-                    Paragraph::new("│").style(Style::default().fg(Color::DarkGray)),
-                    Rect::new(px, y, 1, 1),
-                );
-            }
+        if y != py && y % 2 == 0 && px < buf_area.width {
+            frame.render_widget(
+                Paragraph::new("│").style(Style::default().fg(Color::DarkGray)),
+                Rect::new(px, y, 1, 1),
+            );
         }
     }
 
     // Horizontal line (sparse dashes)
     for x in cx..cx + cw {
-        if x != px && x % 3 == 0 {
-            if py < cy + ch {
-                frame.render_widget(
-                    Paragraph::new("─").style(Style::default().fg(Color::DarkGray)),
-                    Rect::new(x, py, 1, 1),
-                );
-            }
+        if x != px && x % 3 == 0 && py < buf_area.height && x < buf_area.width {
+            frame.render_widget(
+                Paragraph::new("─").style(Style::default().fg(Color::DarkGray)),
+                Rect::new(x, py, 1, 1),
+            );
         }
     }
 
     // Crosshair center
-    if px < cx + cw && py < cy + ch {
+    if px < buf_area.width && py < buf_area.height {
         frame.render_widget(
             Paragraph::new("┼").style(crosshair_style),
             Rect::new(px, py, 1, 1),
@@ -1114,27 +1113,31 @@ fn draw_crosshair(
 
     // X-axis tick mark (at bottom of chart area)
     let tick_y = cy + ch;
-    if px < cx + cw && tick_y < cy + ch + 2 {
+    if tick_y < buf_area.height {
         let label = format!("{:.1}", data_x);
         let label_len = label.len() as u16;
         let label_x = px.saturating_sub(label_len / 2);
-        if label_x + label_len <= cx + cw + 4 {
+        let avail_w = buf_area.width.saturating_sub(label_x);
+        if avail_w > 0 {
             frame.render_widget(
                 Paragraph::new(label).style(Style::default().fg(Color::Yellow)),
-                Rect::new(label_x, tick_y, label_len + 1, 1),
+                Rect::new(label_x, tick_y, label_len.min(avail_w), 1),
             );
         }
     }
 
     // Y-axis tick mark (at left edge of chart area)
-    if py < cy + ch {
+    if py < buf_area.height {
         let label = format!("{:.2}", data_y);
         let label_len = label.len() as u16;
         let label_x = cx.saturating_sub(label_len + 1);
-        frame.render_widget(
-            Paragraph::new(label).style(Style::default().fg(Color::Yellow)),
-            Rect::new(label_x, py, label_len + 1, 1),
-        );
+        let avail_w = buf_area.width.saturating_sub(label_x);
+        if avail_w > 0 {
+            frame.render_widget(
+                Paragraph::new(label).style(Style::default().fg(Color::Yellow)),
+                Rect::new(label_x, py, label_len.min(avail_w), 1),
+            );
+        }
     }
 }
 
@@ -1243,5 +1246,74 @@ mod tests {
 
         assert!(row.contains("[?]Help"), "title bar should contain '[?]Help', got: {}", row);
         assert!(row.contains("[q]Quit"), "title bar should contain '[q]Quit', got: {}", row);
+    }
+
+    #[test]
+    fn crosshair_at_max_bounds_no_panic() {
+        // Reproduces the crash: frac_x=1.0 would produce px == cx + cw (out of bounds)
+        let backend = TestBackend::new(116, 36);
+        let mut terminal = Terminal::new(backend).unwrap();
+
+        terminal
+            .draw(|frame| {
+                // Chart area that fills the buffer
+                let cx = 0;
+                let cy = 0;
+                let cw = 116;
+                let ch = 36;
+                // data_x at maximum bound (frac_x = 1.0)
+                draw_crosshair(frame, cx, cy, cw, ch, 100.0, 50.0, 0.0, 100.0, 0.0, 100.0);
+            })
+            .unwrap();
+        // If we get here without panicking, the test passes
+    }
+
+    #[test]
+    fn crosshair_at_origin_no_panic() {
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+
+        terminal
+            .draw(|frame| {
+                draw_crosshair(frame, 10, 5, 60, 15, 0.0, 0.0, 0.0, 100.0, 0.0, 100.0);
+            })
+            .unwrap();
+    }
+
+    #[test]
+    fn crosshair_near_edges_no_panic() {
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+
+        terminal
+            .draw(|frame| {
+                // Chart area extends to the edge of the buffer
+                let cx = 20;
+                let cy = 5;
+                let cw = 60;
+                let ch = 19;
+                // Test all four corners
+                draw_crosshair(frame, cx, cy, cw, ch, 0.0, 0.0, 0.0, 100.0, 0.0, 100.0);
+                draw_crosshair(frame, cx, cy, cw, ch, 100.0, 0.0, 0.0, 100.0, 0.0, 100.0);
+                draw_crosshair(frame, cx, cy, cw, ch, 0.0, 100.0, 0.0, 100.0, 0.0, 100.0);
+                draw_crosshair(frame, cx, cy, cw, ch, 100.0, 100.0, 0.0, 100.0, 0.0, 100.0);
+            })
+            .unwrap();
+    }
+
+    #[test]
+    fn crosshair_tiny_area_no_panic() {
+        let backend = TestBackend::new(10, 5);
+        let mut terminal = Terminal::new(backend).unwrap();
+
+        terminal
+            .draw(|frame| {
+                // Minimum viable chart area
+                draw_crosshair(frame, 0, 0, 2, 2, 50.0, 50.0, 0.0, 100.0, 0.0, 100.0);
+                // Degenerate areas should be no-ops
+                draw_crosshair(frame, 0, 0, 0, 0, 50.0, 50.0, 0.0, 100.0, 0.0, 100.0);
+                draw_crosshair(frame, 0, 0, 1, 1, 50.0, 50.0, 0.0, 100.0, 0.0, 100.0);
+            })
+            .unwrap();
     }
 }
