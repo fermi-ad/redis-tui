@@ -22,6 +22,8 @@ pub struct PlotSlot {
     pub key_name: String,
     pub data: Vec<f64>,
     pub color: Color,
+    pub y_min: Option<f64>,  // None = auto
+    pub y_max: Option<f64>,  // None = auto
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -299,6 +301,8 @@ impl App {
         self.plot_slots.push(PlotSlot {
             key_name: key_name.to_string(),
             data: Vec::new(),
+            y_min: None,
+            y_max: None,
             color,
         });
         true
@@ -665,6 +669,11 @@ impl App {
                 self.fft_x_max = 0.0;
             }
         }
+        // Clear per-slot Y limits
+        for slot in &mut self.plot_slots {
+            slot.y_min = None;
+            slot.y_max = None;
+        }
     }
 
     /// Get the x-axis bounds for the signal chart.
@@ -799,61 +808,99 @@ impl App {
         Ok(())
     }
 
-    /// Open a combined plot settings popup with X and Y limits
+    /// Open plot settings popup: unified X limits + per-slot Y limits
     pub fn start_plot_settings(&mut self) {
         let (x_min, x_max) = match self.plot_focus {
             PlotFocus::Signal => self.signal_x_bounds(),
             PlotFocus::FFT => self.fft_x_bounds(),
         };
-        let (y_min, y_max) = match self.plot_focus {
-            PlotFocus::Signal => self.auto_signal_bounds(),
-            PlotFocus::FFT => self.auto_fft_bounds(),
-        };
-        let label = match self.plot_focus {
-            PlotFocus::Signal => "Signal",
-            PlotFocus::FFT => "FFT",
-        };
-        self.edit_fields = vec![
-            (format!("{} X Min", label), format!("{:.2}", x_min)),
-            (format!("{} X Max", label), format!("{:.2}", x_max)),
-            (format!("{} Y Min", label), format!("{:.2}", y_min)),
-            (format!("{} Y Max", label), format!("{:.2}", y_max)),
+        let mut fields = vec![
+            ("X Min".to_string(), format!("{:.2}", x_min)),
+            ("X Max".to_string(), format!("{:.2}", x_max)),
         ];
+        if self.plot_slots.is_empty() {
+            // No multi-key: single Y range
+            let (y_min, y_max) = if self.plot_auto_limits {
+                self.auto_signal_bounds()
+            } else {
+                (self.plot_y_min, self.plot_y_max)
+            };
+            fields.push(("Y Min".to_string(), format!("{:.2}", y_min)));
+            fields.push(("Y Max".to_string(), format!("{:.2}", y_max)));
+        } else {
+            // Per-slot Y limits
+            for slot in &self.plot_slots {
+                let auto_min = slot.data.iter().copied()
+                    .filter(|v| v.is_finite()).fold(f64::INFINITY, f64::min);
+                let auto_max = slot.data.iter().copied()
+                    .filter(|v| v.is_finite()).fold(f64::NEG_INFINITY, f64::max);
+                let y_min = slot.y_min.unwrap_or(if auto_min.is_finite() { auto_min } else { 0.0 });
+                let y_max = slot.y_max.unwrap_or(if auto_max.is_finite() { auto_max } else { 1.0 });
+                let short_name = if slot.key_name.len() > 10 {
+                    format!("{}...", &slot.key_name[..10])
+                } else {
+                    slot.key_name.clone()
+                };
+                fields.push((format!("{} Y Min", short_name), format!("{:.2}", y_min)));
+                fields.push((format!("{} Y Max", short_name), format!("{:.2}", y_max)));
+            }
+        }
+        self.edit_fields = fields;
         self.edit_focus = 0;
         self.input_mode = InputMode::PlotLimit;
     }
 
-    /// Apply combined plot settings (X + Y limits)
+    /// Apply plot settings: unified X + per-slot Y limits
     pub fn apply_plot_settings(&mut self) -> Result<(), String> {
         let x_min: f64 = self.edit_fields[0].1.trim().parse()
             .map_err(|_| "Invalid X Min".to_string())?;
         let x_max: f64 = self.edit_fields[1].1.trim().parse()
             .map_err(|_| "Invalid X Max".to_string())?;
-        let y_min: f64 = self.edit_fields[2].1.trim().parse()
-            .map_err(|_| "Invalid Y Min".to_string())?;
-        let y_max: f64 = self.edit_fields[3].1.trim().parse()
-            .map_err(|_| "Invalid Y Max".to_string())?;
         if x_min >= x_max {
             return Err("X Min must be less than X Max".to_string());
-        }
-        if y_min >= y_max {
-            return Err("Y Min must be less than Y Max".to_string());
         }
         match self.plot_focus {
             PlotFocus::Signal => {
                 self.plot_x_min = x_min;
                 self.plot_x_max = x_max;
-                self.plot_y_min = y_min;
-                self.plot_y_max = y_max;
-                self.plot_auto_limits = false;
             }
             PlotFocus::FFT => {
                 self.fft_x_min = x_min;
                 self.fft_x_max = x_max;
-                self.fft_y_min = y_min;
-                self.fft_y_max = y_max;
-                self.fft_auto_limits = false;
             }
+        }
+
+        if self.plot_slots.is_empty() {
+            // Single Y range
+            if self.edit_fields.len() >= 4 {
+                let y_min: f64 = self.edit_fields[2].1.trim().parse()
+                    .map_err(|_| "Invalid Y Min".to_string())?;
+                let y_max: f64 = self.edit_fields[3].1.trim().parse()
+                    .map_err(|_| "Invalid Y Max".to_string())?;
+                if y_min >= y_max {
+                    return Err("Y Min must be less than Y Max".to_string());
+                }
+                self.plot_y_min = y_min;
+                self.plot_y_max = y_max;
+                self.plot_auto_limits = false;
+            }
+        } else {
+            // Per-slot Y limits (fields start at index 2, 2 fields per slot)
+            for (i, slot) in self.plot_slots.iter_mut().enumerate() {
+                let base = 2 + i * 2;
+                if base + 1 < self.edit_fields.len() {
+                    let y_min: f64 = self.edit_fields[base].1.trim().parse()
+                        .map_err(|_| format!("Invalid Y Min for '{}'", slot.key_name))?;
+                    let y_max: f64 = self.edit_fields[base + 1].1.trim().parse()
+                        .map_err(|_| format!("Invalid Y Max for '{}'", slot.key_name))?;
+                    if y_min >= y_max {
+                        return Err(format!("Y Min >= Y Max for '{}'", slot.key_name));
+                    }
+                    slot.y_min = Some(y_min);
+                    slot.y_max = Some(y_max);
+                }
+            }
+            self.plot_auto_limits = false;
         }
         Ok(())
     }

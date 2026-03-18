@@ -363,8 +363,9 @@ fn draw_signal_chart(frame: &mut Frame, app: &mut App, area: Rect, title: &str, 
         .collect();
 
     // When auto-limits: use raw values with unified Y-axis across all slots
-    // When manual limits: normalize each slot independently to 0.0-1.0
-    let normalize = !app.plot_slots.is_empty() && !app.plot_auto_limits;
+    // When manual/per-slot limits: normalize each slot to 0.0-1.0 using its own Y range
+    let has_per_slot_limits = app.plot_slots.iter().any(|s| s.y_min.is_some());
+    let normalize = !app.plot_slots.is_empty() && (!app.plot_auto_limits || has_per_slot_limits);
 
     struct SlotRender {
         points: Vec<(f64, f64)>,
@@ -375,25 +376,27 @@ fn draw_signal_chart(frame: &mut Frame, app: &mut App, area: Rect, title: &str, 
         .plot_slots
         .iter()
         .map(|slot| {
-            let y_min = slot.data.iter().copied()
+            let auto_min = slot.data.iter().copied()
                 .filter(|v| v.is_finite())
                 .fold(f64::INFINITY, f64::min);
-            let y_max = slot.data.iter().copied()
+            let auto_max = slot.data.iter().copied()
                 .filter(|v| v.is_finite())
                 .fold(f64::NEG_INFINITY, f64::max);
+            // Use per-slot limits if set, otherwise auto
+            let y_min = slot.y_min.unwrap_or(if auto_min.is_finite() { auto_min } else { 0.0 });
+            let y_max = slot.y_max.unwrap_or(if auto_max.is_finite() { auto_max } else { 1.0 });
             let points = if normalize {
                 let range = y_max - y_min;
-                let safe_range = if !range.is_finite() || range == 0.0 { 1.0 } else { range };
+                let safe_range = if range == 0.0 { 1.0 } else { range };
                 slot.data
                     .iter()
                     .enumerate()
                     .map(|(i, v)| {
-                        let normalized = if !range.is_finite() { 0.5 } else { (v - y_min) / safe_range };
+                        let normalized = (v - y_min) / safe_range;
                         (i as f64, normalized)
                     })
                     .collect()
             } else {
-                // Raw values — auto-scale will compute unified bounds
                 slot.data.iter().enumerate().map(|(i, v)| (i as f64, *v)).collect()
             };
             SlotRender { points, y_min, y_max }
