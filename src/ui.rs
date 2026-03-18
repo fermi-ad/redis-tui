@@ -362,10 +362,8 @@ fn draw_signal_chart(frame: &mut Frame, app: &mut App, area: Rect, title: &str, 
         .map(|(i, v)| (i as f64, *v))
         .collect();
 
-    // When auto-limits: use raw values with unified Y-axis across all slots
-    // When manual/per-slot limits: normalize each slot to 0.0-1.0 using its own Y range
-    let has_per_slot_limits = app.plot_slots.iter().any(|s| s.y_min.is_some());
-    let normalize = !app.plot_slots.is_empty() && (!app.plot_auto_limits || has_per_slot_limits);
+    // When multiple keys: always normalize each slot to 0.0-1.0 for individual Y scales
+    let normalize = app.plot_slots.len() > 1;
 
     struct SlotRender {
         points: Vec<(f64, f64)>,
@@ -420,12 +418,13 @@ fn draw_signal_chart(frame: &mut Frame, app: &mut App, area: Rect, title: &str, 
         app.signal_x_bounds()
     };
 
-    let (y_lo, y_hi) = if !app.plot_slots.is_empty() && app.plot_auto_limits {
-        // Auto: unified bounds across all slot data (raw values)
-        let all_data: Vec<f64> = app.plot_slots.iter()
-            .flat_map(|s| s.data.iter().copied())
-            .filter(|v| v.is_finite())
-            .collect();
+    let (y_lo, y_hi) = if app.plot_slots.len() > 1 {
+        // Multi-key: always normalized 0-1, per-key Y scales rendered separately
+        (-0.05, 1.05)
+    } else if !app.plot_slots.is_empty() && app.plot_auto_limits {
+        // Single slot, auto: use its actual bounds
+        let all_data: Vec<f64> = app.plot_slots[0].data.iter().copied()
+            .filter(|v| v.is_finite()).collect();
         if all_data.is_empty() {
             (0.0, 1.0)
         } else {
@@ -435,9 +434,6 @@ fn draw_signal_chart(frame: &mut Frame, app: &mut App, area: Rect, title: &str, 
             let pad = if range == 0.0 { 1.0 } else { range * 0.1 };
             (y_min - pad, y_max + pad)
         }
-    } else if !app.plot_slots.is_empty() {
-        // Manual: data is normalized to 0-1
-        (-0.05, 1.05)
     } else if app.plot_auto_limits {
         app.auto_signal_bounds()
     } else {
@@ -515,16 +511,21 @@ fn draw_signal_chart(frame: &mut Frame, app: &mut App, area: Rect, title: &str, 
                     Line::from(format!("{:.0}", x_hi)),
                 ]),
         )
-        .y_axis(
+        .y_axis(if app.plot_slots.len() > 1 {
+            // Multi-key: hide default Y-axis labels, we'll draw per-key ones
             Axis::default()
-                .title(if app.plot_slots.is_empty() || app.plot_auto_limits { "Value" } else { "Norm" })
+                .bounds([y_lo, y_hi])
+                .labels(vec![Line::from(""), Line::from(""), Line::from("")])
+        } else {
+            Axis::default()
+                .title("Value")
                 .bounds([y_lo, y_hi])
                 .labels(vec![
                     Line::from(format!("{:.2}", y_lo)),
                     Line::from(format!("{:.2}", (y_lo + y_hi) / 2.0)),
                     Line::from(format!("{:.2}", y_hi)),
-                ]),
-        )
+                ])
+        })
         .legend_position(Some(ratatui::widgets::LegendPosition::TopRight))
         .hidden_legend_constraints((Constraint::Min(0), Constraint::Min(0)));
 
@@ -533,11 +534,54 @@ fn draw_signal_chart(frame: &mut Frame, app: &mut App, area: Rect, title: &str, 
     // Store chart inner area for mouse hit testing (inside borders)
     let inner = Block::default().borders(Borders::ALL).inner(area);
     // Approximate: ratatui chart uses ~7 chars for y-axis labels, 2 for x-axis
-    let chart_x = inner.x + 7;
+    let y_label_width: u16 = if app.plot_slots.len() > 1 { 1 } else { 7 };
+    let chart_x = inner.x + y_label_width;
     let chart_y = inner.y;
-    let chart_w = inner.width.saturating_sub(7);
+    let chart_w = inner.width.saturating_sub(y_label_width);
     let chart_h = inner.height.saturating_sub(2);
     app.signal_chart_area = Some((chart_x, chart_y, chart_w, chart_h));
+
+    // Draw per-key Y-axis scales when multiple keys are plotted
+    if app.plot_slots.len() > 1 && !slot_renders.is_empty() {
+        let num_slots = slot_renders.len().min(app.plot_slots.len());
+        // Each slot gets a column of Y labels on the left side
+        let label_width = 9u16; // enough for "-99999.9"
+        let buf_area = frame.area();
+
+        for (i, sr) in slot_renders.iter().enumerate().take(num_slots) {
+            let color = app.plot_slots[i].color;
+            let col_x = inner.x + (i as u16) * label_width;
+            if col_x + label_width > buf_area.width { break; }
+
+            // Top: Y max
+            if chart_y > 0 && chart_y < buf_area.height {
+                frame.render_widget(
+                    Paragraph::new(format!("{:.1}", sr.y_max))
+                        .style(Style::default().fg(color)),
+                    Rect::new(col_x, chart_y, label_width, 1),
+                );
+            }
+            // Middle: midpoint
+            let mid_y = chart_y + chart_h / 2;
+            if mid_y < buf_area.height {
+                let mid_val = (sr.y_min + sr.y_max) / 2.0;
+                frame.render_widget(
+                    Paragraph::new(format!("{:.1}", mid_val))
+                        .style(Style::default().fg(color)),
+                    Rect::new(col_x, mid_y, label_width, 1),
+                );
+            }
+            // Bottom: Y min
+            let bot_y = chart_y + chart_h.saturating_sub(1);
+            if bot_y < buf_area.height && bot_y != mid_y {
+                frame.render_widget(
+                    Paragraph::new(format!("{:.1}", sr.y_min))
+                        .style(Style::default().fg(color)),
+                    Rect::new(col_x, bot_y, label_width, 1),
+                );
+            }
+        }
+    }
 
     // Draw crosshair tick marks if hovering in signal chart
     if !app.hover_in_fft {
