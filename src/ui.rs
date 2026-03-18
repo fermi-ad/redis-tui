@@ -143,18 +143,31 @@ fn draw_key_list(frame: &mut Frame, app: &mut App, area: Rect) {
 
             let is_collision = collision_keys.contains(key.as_str());
             let plot_color = app.plot_color_for_key(key);
+            let is_listening = app.listening_keys.iter().any(|k| k == key);
+            let is_siggen = app.siggen_keys.iter().any(|k| k == key);
             let mut spans = vec![
                 Span::styled(
                     format!("{:<6}", type_badge.0),
                     Style::default().fg(type_badge.1),
                 ),
             ];
-            // Show plot indicator with slot color
+            // Indicators: P=plotting, L=listening, W=signal gen
             if let Some(color) = plot_color {
-                spans.push(Span::styled("\u{25CF} ", Style::default().fg(color)));
+                spans.push(Span::styled("P", Style::default().fg(color)));
             } else {
-                spans.push(Span::raw("  "));
+                spans.push(Span::styled(" ", Style::default()));
             }
+            if is_listening {
+                spans.push(Span::styled("L", Style::default().fg(Color::Green)));
+            } else {
+                spans.push(Span::styled(" ", Style::default()));
+            }
+            if is_siggen {
+                spans.push(Span::styled("W", Style::default().fg(Color::Red)));
+            } else {
+                spans.push(Span::styled(" ", Style::default()));
+            }
+            spans.push(Span::raw(" "));
             if is_collision {
                 spans.push(Span::styled("! ", Style::default().fg(Color::Yellow)));
             }

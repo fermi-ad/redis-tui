@@ -113,6 +113,8 @@ pub struct App {
     pub endianness: Endianness,
     pub plot_data: Vec<f64>,            // primary key's plot data (backward compat)
     pub plot_slots: Vec<PlotSlot>,      // multi-key plot FIFO (up to MAX_PLOT_SLOTS)
+    pub listening_keys: Vec<String>,    // keys with active stream listeners (set by main loop)
+    pub siggen_keys: Vec<String>,       // keys with active signal generators (set by main loop)
     pub plot_auto_limits: bool,
     pub plot_y_min: f64,
     pub plot_y_max: f64,
@@ -209,6 +211,8 @@ impl App {
             endianness: Endianness::Little,
             plot_data: Vec::new(),
             plot_slots: Vec::new(),
+            listening_keys: Vec::new(),
+            siggen_keys: Vec::new(),
             plot_auto_limits: true,
             plot_y_min: 0.0,
             plot_y_max: 1.0,

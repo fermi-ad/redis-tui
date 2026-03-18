@@ -289,7 +289,7 @@ fn run_app(
     app.connected = client.is_connected();
 
     let mut stream_listeners: Vec<StreamListener> = Vec::new();
-    let mut signal_generator: Option<SignalGenerator> = None;
+    let mut signal_generators: Vec<SignalGenerator> = Vec::new();
 
     loop {
         terminal.draw(|frame| ui::draw(frame, &mut app))?;
@@ -309,9 +309,6 @@ fn run_app(
                 if key.kind != event::KeyEventKind::Press {
                     continue;
                 }
-                // Stop stream listener on any navigation away
-                let prev_key = app.selected_key_name().map(|s| s.to_string());
-
                 match app.input_mode {
                     InputMode::Filter => handle_filter_input(&mut app, client, key.code),
                     InputMode::Confirm => handle_confirm_input(&mut app, client, key.code),
@@ -351,9 +348,14 @@ fn run_app(
                             };
                             if let Some(k) = app.selected_key_name().map(|s| s.to_string()) {
                                 let key_url = client.url_for_key(&k).to_string();
-                                signal_generator = SignalGenerator::start(&key_url, &k, app.db, config);
-                                if signal_generator.is_some() {
-                                    app.status_message = format!("Signal gen: running on '{}'", k);
+                                if let Some(sg) = SignalGenerator::start(&key_url, &k, app.db, config) {
+                                    // Evict oldest if at capacity
+                                    if signal_generators.len() >= app::MAX_PLOT_SLOTS {
+                                        let mut oldest = signal_generators.remove(0);
+                                        oldest.stop();
+                                    }
+                                    signal_generators.push(sg);
+                                    app.status_message = format!("Signal gen: running on '{}' ({}/{})", k, signal_generators.len(), app::MAX_PLOT_SLOTS);
                                 } else {
                                     app.status_message = "Signal gen: failed to start".to_string();
                                 }
@@ -368,9 +370,9 @@ fn run_app(
                             if let Some(k) = app.selected_key_name().map(|s| s.to_string()) {
                                 let added = app.toggle_plot_slot(&k);
                                 if added {
-                                    // Load current data into the new slot
-                                    if let Some(ref value) = app.current_value {
-                                        app.update_slot_data(&k, &value.clone());
+                                    // Fetch value directly from Redis for this key
+                                    if let Ok(value) = client.get_value(&k) {
+                                        app.update_slot_data(&k, &value);
                                     }
                                     app.plot_visible = true;
                                     app.status_message = format!("Plot: added '{}' ({}/{})", k, app.plot_slots.len(), app::MAX_PLOT_SLOTS);
@@ -411,25 +413,21 @@ fn run_app(
 
                         // Toggle signal generator with 'w'
                         if key.code == KeyCode::Char('w') {
-                            if signal_generator.is_some() {
-                                if let Some(mut sg) = signal_generator.take() {
+                            if let Some(k) = app.selected_key_name().map(|s| s.to_string()) {
+                                // Check if already generating on this key
+                                if let Some(idx) = signal_generators.iter().position(|sg| sg.watching_key == k) {
+                                    let mut sg = signal_generators.remove(idx);
                                     sg.stop();
+                                    app.status_message = format!("Signal gen: stopped '{}'", k);
+                                } else if app.is_viewing_stream() {
+                                    app.start_signal_gen_popup();
+                                } else {
+                                    app.status_message = "Signal gen: select a stream key first".to_string();
                                 }
-                                app.status_message = "Signal gen: stopped".to_string();
-                            } else if app.is_viewing_stream() {
-                                app.start_signal_gen_popup();
-                            } else {
-                                app.status_message = "Signal gen: select a stream key first (Enter)".to_string();
                             }
                         }
 
-                        // Stop signal generator if user navigated to a different key
-                        let new_key = app.selected_key_name().map(|s| s.to_string());
-                        if prev_key != new_key {
-                            if let Some(mut sg) = signal_generator.take() {
-                                sg.stop();
-                            }
-                        }
+                        // No longer stop generators on key navigation — they run independently
                     }
                 }
             }
@@ -453,8 +451,12 @@ fn run_app(
             }
         }
 
+        // Sync active key indicators for UI
+        app.listening_keys = stream_listeners.iter().map(|sl| sl.watching_key.clone()).collect();
+        app.siggen_keys = signal_generators.iter().map(|sg| sg.watching_key.clone()).collect();
+
         if !app.running {
-            drop(signal_generator);
+            drop(signal_generators);
             drop(stream_listeners);
             return Ok(());
         }
