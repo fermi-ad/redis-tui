@@ -449,7 +449,13 @@ fn draw_signal_chart(frame: &mut Frame, app: &mut App, area: Rect, title: &str, 
         for (i, slot) in app.plot_slots.iter().enumerate() {
             if !slot.data.is_empty() {
                 let sr = &slot_renders[i];
-                let legend_name = format!("{} [{:.1}..{:.1}]", slot.key_name, sr.y_min, sr.y_max);
+                // Truncate key name to keep legend compact
+                let short_name = if slot.key_name.len() > 12 {
+                    format!("{}...", &slot.key_name[..12])
+                } else {
+                    slot.key_name.clone()
+                };
+                let legend_name = format!("{} [{:.0}..{:.0}]", short_name, sr.y_min, sr.y_max);
                 datasets.push(Dataset::default()
                     .name(legend_name)
                     .marker(marker)
@@ -487,7 +493,8 @@ fn draw_signal_chart(frame: &mut Frame, app: &mut App, area: Rect, title: &str, 
                     Line::from(format!("{:.2}", y_hi)),
                 ]),
         )
-        .legend_position(Some(ratatui::widgets::LegendPosition::TopRight));
+        .legend_position(Some(ratatui::widgets::LegendPosition::TopRight))
+        .hidden_legend_constraints((Constraint::Min(0), Constraint::Min(0)));
 
     frame.render_widget(chart, area);
 
@@ -838,12 +845,13 @@ fn draw_help_popup(frame: &mut Frame, app: &App, area: Rect) {
 }
 
 fn draw_plot_limit_popup(frame: &mut Frame, app: &App, area: Rect) {
-    let popup_area = centered_rect(50, 8, area);
+    let popup_height = (app.edit_fields.len() as u16) + 5; // fields + title + blank + buttons + borders
+    let popup_area = centered_rect(50, popup_height, area);
     frame.render_widget(Clear, popup_area);
 
     let mut lines: Vec<Line> = Vec::new();
     lines.push(Line::from(Span::styled(
-        "Set Y-Axis Limits",
+        "Plot Settings",
         Style::default()
             .fg(Color::Yellow)
             .add_modifier(Modifier::BOLD),
