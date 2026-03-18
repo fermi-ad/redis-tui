@@ -112,6 +112,15 @@ fn main() -> Result<()> {
             .with_context(|| format!("Failed to connect to Redis at {}", url))?
     };
 
+    // Install panic hook that restores the terminal before printing the panic
+    let original_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let _ = disable_raw_mode();
+        let _ = io::stdout().execute(DisableMouseCapture);
+        let _ = io::stdout().execute(LeaveAlternateScreen);
+        original_hook(info);
+    }));
+
     // Set up terminal
     enable_raw_mode().context("Failed to enable raw mode")?;
     io::stdout()
