@@ -1,8 +1,30 @@
 use crate::data::{DataType, Endianness, decode_blob, encode_values, is_binary};
 use crate::redis_client::{KeyInfo, MultiRedisClient, RedisValue, StreamEntry};
+use ratatui::style::Color;
 use ratatui::widgets::ListState;
 use rustfft::{FftPlanner, num_complex::Complex};
 use std::sync::mpsc;
+
+/// Maximum number of keys that can be plotted simultaneously
+pub const MAX_PLOT_SLOTS: usize = 4;
+
+/// Colors assigned to each plot slot
+pub const PLOT_COLORS: [Color; MAX_PLOT_SLOTS] = [
+    Color::Cyan,
+    Color::Yellow,
+    Color::Green,
+    Color::Magenta,
+];
+
+/// A slot in the multi-key plot FIFO
+#[derive(Clone)]
+pub struct PlotSlot {
+    pub key_name: String,
+    pub data: Vec<f64>,
+    pub color: Color,
+    pub y_min: Option<f64>,  // None = auto
+    pub y_max: Option<f64>,  // None = auto
+}
 
 #[derive(Debug, Clone, PartialEq)]
 #[allow(dead_code)]
@@ -91,7 +113,10 @@ pub struct App {
     // Data plot
     pub data_type: DataType,
     pub endianness: Endianness,
-    pub plot_data: Vec<f64>,
+    pub plot_data: Vec<f64>,            // primary key's plot data (backward compat)
+    pub plot_slots: Vec<PlotSlot>,      // multi-key plot FIFO (up to MAX_PLOT_SLOTS)
+    pub listening_keys: Vec<String>,    // keys with active stream listeners (set by main loop)
+    pub siggen_keys: Vec<String>,       // keys with active signal generators (set by main loop)
     pub plot_auto_limits: bool,
     pub plot_y_min: f64,
     pub plot_y_max: f64,
@@ -187,6 +212,9 @@ impl App {
             data_type: DataType::UInt8,
             endianness: Endianness::Little,
             plot_data: Vec::new(),
+            plot_slots: Vec::new(),
+            listening_keys: Vec::new(),
+            siggen_keys: Vec::new(),
             plot_auto_limits: true,
             plot_y_min: 0.0,
             plot_y_max: 1.0,
@@ -247,6 +275,111 @@ impl App {
             signal_gen_focus: 0,
             signal_gen_wave_idx: 0,
             signal_gen_dtype_idx: 7, // float32 index in DataType::all()
+        }
+    }
+
+    /// Toggle a key in the plot slots. Returns true if added, false if removed.
+    pub fn toggle_plot_slot(&mut self, key_name: &str) -> bool {
+        // If already plotted, remove it
+        if let Some(idx) = self.plot_slots.iter().position(|s| s.key_name == key_name) {
+            self.plot_slots.remove(idx);
+            // Reassign colors to keep them sequential
+            for (i, slot) in self.plot_slots.iter_mut().enumerate() {
+                slot.color = PLOT_COLORS[i];
+            }
+            return false;
+        }
+        // If at capacity, evict the oldest (first) slot
+        if self.plot_slots.len() >= MAX_PLOT_SLOTS {
+            self.plot_slots.remove(0);
+            for (i, slot) in self.plot_slots.iter_mut().enumerate() {
+                slot.color = PLOT_COLORS[i];
+            }
+        }
+        // Add new slot
+        let color = PLOT_COLORS[self.plot_slots.len()];
+        self.plot_slots.push(PlotSlot {
+            key_name: key_name.to_string(),
+            data: Vec::new(),
+            y_min: None,
+            y_max: None,
+            color,
+        });
+        true
+    }
+
+    /// Get the color assigned to a plotted key, if any
+    pub fn plot_color_for_key(&self, key_name: &str) -> Option<Color> {
+        self.plot_slots.iter().find(|s| s.key_name == key_name).map(|s| s.color)
+    }
+
+    /// Update plot data for a specific slot by key name
+    pub fn update_slot_data(&mut self, key_name: &str, value: &RedisValue) {
+        if let Some(slot) = self.plot_slots.iter_mut().find(|s| s.key_name == key_name) {
+            slot.data = match value {
+                RedisValue::String(bytes) => {
+                    decode_blob(bytes, self.data_type, self.endianness)
+                }
+                RedisValue::Stream(entries) => {
+                    extract_stream_plot_data(entries, self.data_type, self.endianness)
+                }
+                RedisValue::List(items) => {
+                    let mut data = Vec::new();
+                    for item in items {
+                        if let Ok(s) = std::str::from_utf8(item) {
+                            if let Ok(v) = s.parse::<f64>() {
+                                data.push(v);
+                                continue;
+                            }
+                        }
+                        data.extend(decode_blob(item, self.data_type, self.endianness));
+                    }
+                    data
+                }
+                RedisValue::ZSet(pairs) => {
+                    pairs.iter().map(|(_, score)| *score).collect()
+                }
+                RedisValue::Hash(pairs) => {
+                    let mut data = Vec::new();
+                    for (_, val) in pairs {
+                        if let Ok(s) = std::str::from_utf8(val) {
+                            if let Ok(v) = s.parse::<f64>() {
+                                data.push(v);
+                                continue;
+                            }
+                        }
+                        data.extend(decode_blob(val, self.data_type, self.endianness));
+                    }
+                    data
+                }
+                _ => Vec::new(),
+            };
+            // Sanitize
+            for v in &mut slot.data {
+                if !v.is_finite() {
+                    *v = 0.0;
+                }
+            }
+        }
+    }
+
+    /// Append stream entries to a specific plot slot
+    pub fn append_slot_stream_entries(&mut self, key_name: &str, new_entries: &[StreamEntry]) {
+        if let Some(slot) = self.plot_slots.iter_mut().find(|s| s.key_name == key_name) {
+            // Re-extract plot data from the newest entry
+            if let Some(entry) = new_entries.last() {
+                for (fname, fval) in &entry.fields {
+                    if fname.starts_with('_') {
+                        slot.data = decode_blob(fval, self.data_type, self.endianness);
+                        for v in &mut slot.data {
+                            if !v.is_finite() {
+                                *v = 0.0;
+                            }
+                        }
+                        break;
+                    }
+                }
+            }
         }
     }
 
@@ -536,6 +669,11 @@ impl App {
                 self.fft_x_max = 0.0;
             }
         }
+        // Clear per-slot Y limits
+        for slot in &mut self.plot_slots {
+            slot.y_min = None;
+            slot.y_max = None;
+        }
     }
 
     /// Get the x-axis bounds for the signal chart.
@@ -641,23 +779,6 @@ impl App {
         None
     }
 
-    pub fn start_set_plot_limits(&mut self) {
-        let (y_min, y_max) = match self.plot_focus {
-            PlotFocus::Signal => self.auto_signal_bounds(),
-            PlotFocus::FFT => self.auto_fft_bounds(),
-        };
-        let label = match self.plot_focus {
-            PlotFocus::Signal => "Signal",
-            PlotFocus::FFT => "FFT",
-        };
-        self.edit_fields = vec![
-            (format!("{} Y Min", label), format!("{:.2}", y_min)),
-            (format!("{} Y Max", label), format!("{:.2}", y_max)),
-        ];
-        self.edit_focus = 0;
-        self.input_mode = InputMode::PlotLimit;
-    }
-
     pub fn apply_plot_limits(&mut self) -> Result<(), String> {
         let y_min: f64 = self.edit_fields[0]
             .1
@@ -687,21 +808,101 @@ impl App {
         Ok(())
     }
 
-    pub fn start_set_x_limits(&mut self) {
+    /// Open plot settings popup: unified X limits + per-slot Y limits
+    pub fn start_plot_settings(&mut self) {
         let (x_min, x_max) = match self.plot_focus {
             PlotFocus::Signal => self.signal_x_bounds(),
             PlotFocus::FFT => self.fft_x_bounds(),
         };
-        let label = match self.plot_focus {
-            PlotFocus::Signal => "Signal",
-            PlotFocus::FFT => "FFT",
-        };
-        self.edit_fields = vec![
-            (format!("{} X Min", label), format!("{:.2}", x_min)),
-            (format!("{} X Max", label), format!("{:.2}", x_max)),
+        let mut fields = vec![
+            ("X Min".to_string(), format!("{:.2}", x_min)),
+            ("X Max".to_string(), format!("{:.2}", x_max)),
         ];
+        if self.plot_slots.is_empty() {
+            // No multi-key: single Y range
+            let (y_min, y_max) = if self.plot_auto_limits {
+                self.auto_signal_bounds()
+            } else {
+                (self.plot_y_min, self.plot_y_max)
+            };
+            fields.push(("Y Min".to_string(), format!("{:.2}", y_min)));
+            fields.push(("Y Max".to_string(), format!("{:.2}", y_max)));
+        } else {
+            // Per-slot Y limits
+            for slot in &self.plot_slots {
+                let auto_min = slot.data.iter().copied()
+                    .filter(|v| v.is_finite()).fold(f64::INFINITY, f64::min);
+                let auto_max = slot.data.iter().copied()
+                    .filter(|v| v.is_finite()).fold(f64::NEG_INFINITY, f64::max);
+                let y_min = slot.y_min.unwrap_or(if auto_min.is_finite() { auto_min } else { 0.0 });
+                let y_max = slot.y_max.unwrap_or(if auto_max.is_finite() { auto_max } else { 1.0 });
+                let short_name = if slot.key_name.len() > 10 {
+                    format!("{}...", &slot.key_name[..10])
+                } else {
+                    slot.key_name.clone()
+                };
+                fields.push((format!("{} Y Min", short_name), format!("{:.2}", y_min)));
+                fields.push((format!("{} Y Max", short_name), format!("{:.2}", y_max)));
+            }
+        }
+        self.edit_fields = fields;
         self.edit_focus = 0;
         self.input_mode = InputMode::PlotLimit;
+    }
+
+    /// Apply plot settings: unified X + per-slot Y limits
+    pub fn apply_plot_settings(&mut self) -> Result<(), String> {
+        let x_min: f64 = self.edit_fields[0].1.trim().parse()
+            .map_err(|_| "Invalid X Min".to_string())?;
+        let x_max: f64 = self.edit_fields[1].1.trim().parse()
+            .map_err(|_| "Invalid X Max".to_string())?;
+        if x_min >= x_max {
+            return Err("X Min must be less than X Max".to_string());
+        }
+        match self.plot_focus {
+            PlotFocus::Signal => {
+                self.plot_x_min = x_min;
+                self.plot_x_max = x_max;
+            }
+            PlotFocus::FFT => {
+                self.fft_x_min = x_min;
+                self.fft_x_max = x_max;
+            }
+        }
+
+        if self.plot_slots.is_empty() {
+            // Single Y range
+            if self.edit_fields.len() >= 4 {
+                let y_min: f64 = self.edit_fields[2].1.trim().parse()
+                    .map_err(|_| "Invalid Y Min".to_string())?;
+                let y_max: f64 = self.edit_fields[3].1.trim().parse()
+                    .map_err(|_| "Invalid Y Max".to_string())?;
+                if y_min >= y_max {
+                    return Err("Y Min must be less than Y Max".to_string());
+                }
+                self.plot_y_min = y_min;
+                self.plot_y_max = y_max;
+                self.plot_auto_limits = false;
+            }
+        } else {
+            // Per-slot Y limits (fields start at index 2, 2 fields per slot)
+            for (i, slot) in self.plot_slots.iter_mut().enumerate() {
+                let base = 2 + i * 2;
+                if base + 1 < self.edit_fields.len() {
+                    let y_min: f64 = self.edit_fields[base].1.trim().parse()
+                        .map_err(|_| format!("Invalid Y Min for '{}'", slot.key_name))?;
+                    let y_max: f64 = self.edit_fields[base + 1].1.trim().parse()
+                        .map_err(|_| format!("Invalid Y Max for '{}'", slot.key_name))?;
+                    if y_min >= y_max {
+                        return Err(format!("Y Min >= Y Max for '{}'", slot.key_name));
+                    }
+                    slot.y_min = Some(y_min);
+                    slot.y_max = Some(y_max);
+                }
+            }
+            self.plot_auto_limits = false;
+        }
+        Ok(())
     }
 
     pub fn apply_x_limits(&mut self) -> Result<(), String> {
@@ -1429,7 +1630,7 @@ fn auto_bounds(data: &[f64]) -> (f64, f64) {
 
 /// Compute FFT magnitude spectrum using rustfft (O(N log N)).
 /// Returns magnitudes for the first N/2 frequency bins (DC to Nyquist).
-fn compute_fft_magnitude(data: &[f64]) -> Vec<f64> {
+pub fn compute_fft_magnitude(data: &[f64]) -> Vec<f64> {
     let n = data.len();
     if n == 0 {
         return Vec::new();
@@ -1456,4 +1657,108 @@ fn compute_fft_magnitude(data: &[f64]) -> Vec<f64> {
         .iter()
         .map(|c| c.norm() * inv_n)
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn toggle_plot_slot_adds_key() {
+        let mut app = App::new();
+        let added = app.toggle_plot_slot("mykey");
+        assert!(added);
+        assert_eq!(app.plot_slots.len(), 1);
+        assert_eq!(app.plot_slots[0].key_name, "mykey");
+        assert_eq!(app.plot_slots[0].color, PLOT_COLORS[0]);
+    }
+
+    #[test]
+    fn toggle_plot_slot_removes_key() {
+        let mut app = App::new();
+        app.toggle_plot_slot("mykey");
+        let added = app.toggle_plot_slot("mykey");
+        assert!(!added);
+        assert!(app.plot_slots.is_empty());
+    }
+
+    #[test]
+    fn toggle_plot_slot_fifo_eviction() {
+        let mut app = App::new();
+        app.toggle_plot_slot("key1");
+        app.toggle_plot_slot("key2");
+        app.toggle_plot_slot("key3");
+        app.toggle_plot_slot("key4");
+        assert_eq!(app.plot_slots.len(), 4);
+
+        // Adding a 5th should evict "key1"
+        app.toggle_plot_slot("key5");
+        assert_eq!(app.plot_slots.len(), 4);
+        assert_eq!(app.plot_slots[0].key_name, "key2");
+        assert_eq!(app.plot_slots[3].key_name, "key5");
+    }
+
+    #[test]
+    fn toggle_plot_slot_colors_reassigned_on_remove() {
+        let mut app = App::new();
+        app.toggle_plot_slot("key1");
+        app.toggle_plot_slot("key2");
+        app.toggle_plot_slot("key3");
+
+        // Remove the middle key
+        app.toggle_plot_slot("key2");
+        assert_eq!(app.plot_slots.len(), 2);
+        assert_eq!(app.plot_slots[0].key_name, "key1");
+        assert_eq!(app.plot_slots[0].color, PLOT_COLORS[0]);
+        assert_eq!(app.plot_slots[1].key_name, "key3");
+        assert_eq!(app.plot_slots[1].color, PLOT_COLORS[1]);
+    }
+
+    #[test]
+    fn key_plotted_check_via_color() {
+        let mut app = App::new();
+        assert!(app.plot_color_for_key("mykey").is_none());
+        app.toggle_plot_slot("mykey");
+        assert!(app.plot_color_for_key("mykey").is_some());
+    }
+
+    #[test]
+    fn plot_color_for_key_returns_correct_color() {
+        let mut app = App::new();
+        app.toggle_plot_slot("key1");
+        app.toggle_plot_slot("key2");
+        assert_eq!(app.plot_color_for_key("key1"), Some(PLOT_COLORS[0]));
+        assert_eq!(app.plot_color_for_key("key2"), Some(PLOT_COLORS[1]));
+        assert_eq!(app.plot_color_for_key("nonexistent"), None);
+    }
+
+    #[test]
+    fn update_slot_data_with_string_value() {
+        let mut app = App::new();
+        app.toggle_plot_slot("mykey");
+        let value = RedisValue::String(vec![0x01, 0x02, 0x03]);
+        app.update_slot_data("mykey", &value);
+        assert_eq!(app.plot_slots[0].data, vec![1.0, 2.0, 3.0]);
+    }
+
+    #[test]
+    fn fifo_eviction_preserves_data() {
+        let mut app = App::new();
+        for i in 1..=4 {
+            let name = format!("key{}", i);
+            app.toggle_plot_slot(&name);
+            let value = RedisValue::String(vec![i as u8]);
+            app.update_slot_data(&name, &value);
+        }
+
+        // Add 5th, key1 evicted
+        app.toggle_plot_slot("key5");
+        let value = RedisValue::String(vec![5]);
+        app.update_slot_data("key5", &value);
+
+        assert_eq!(app.plot_slots[0].key_name, "key2");
+        assert_eq!(app.plot_slots[0].data, vec![2.0]);
+        assert_eq!(app.plot_slots[3].key_name, "key5");
+        assert_eq!(app.plot_slots[3].data, vec![5.0]);
+    }
 }

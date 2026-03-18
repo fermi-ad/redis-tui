@@ -142,12 +142,32 @@ fn draw_key_list(frame: &mut Frame, app: &mut App, area: Rect) {
             };
 
             let is_collision = collision_keys.contains(key.as_str());
+            let plot_color = app.plot_color_for_key(key);
+            let is_listening = app.listening_keys.iter().any(|k| k == key);
+            let is_siggen = app.siggen_keys.iter().any(|k| k == key);
             let mut spans = vec![
                 Span::styled(
                     format!("{:<6}", type_badge.0),
                     Style::default().fg(type_badge.1),
                 ),
             ];
+            // Indicators: P=plotting, L=listening, W=signal gen
+            if let Some(color) = plot_color {
+                spans.push(Span::styled("P", Style::default().fg(color)));
+            } else {
+                spans.push(Span::styled(" ", Style::default()));
+            }
+            if is_listening {
+                spans.push(Span::styled("L", Style::default().fg(Color::Green)));
+            } else {
+                spans.push(Span::styled(" ", Style::default()));
+            }
+            if is_siggen {
+                spans.push(Span::styled("W", Style::default().fg(Color::Red)));
+            } else {
+                spans.push(Span::styled(" ", Style::default()));
+            }
+            spans.push(Span::raw(" "));
             if is_collision {
                 spans.push(Span::styled("! ", Style::default().fg(Color::Yellow)));
             }
@@ -268,8 +288,9 @@ fn draw_data_plot(frame: &mut Frame, app: &mut App, area: Rect) {
         focused_limits, fft_label, log_label, focus_label
     );
 
-    if app.plot_data.is_empty() {
-        let msg = Paragraph::new("No plottable data. Select a key with binary data.")
+    let has_slot_data = app.plot_slots.iter().any(|s| !s.data.is_empty());
+    if app.plot_data.is_empty() && !has_slot_data {
+        let msg = Paragraph::new("No plottable data. Press [p] on a key to add it to the plot.")
             .style(Style::default().fg(Color::DarkGray))
             .block(
                 Block::default()
@@ -333,16 +354,87 @@ fn draw_signal_chart(frame: &mut Frame, app: &mut App, area: Rect, title: &str, 
         return;
     }
 
-    let data_points: Vec<(f64, f64)> = app
+    // Build data points for the primary key (backward compat)
+    let primary_points: Vec<(f64, f64)> = app
         .plot_data
         .iter()
         .enumerate()
         .map(|(i, v)| (i as f64, *v))
         .collect();
 
-    let (x_lo, x_hi) = app.signal_x_bounds();
+    // When multiple keys: always normalize each slot to 0.0-1.0 for individual Y scales
+    let normalize = app.plot_slots.len() > 1;
 
-    let (y_lo, y_hi) = if app.plot_auto_limits {
+    struct SlotRender {
+        points: Vec<(f64, f64)>,
+        y_min: f64,
+        y_max: f64,
+    }
+    let slot_renders: Vec<SlotRender> = app
+        .plot_slots
+        .iter()
+        .map(|slot| {
+            let auto_min = slot.data.iter().copied()
+                .filter(|v| v.is_finite())
+                .fold(f64::INFINITY, f64::min);
+            let auto_max = slot.data.iter().copied()
+                .filter(|v| v.is_finite())
+                .fold(f64::NEG_INFINITY, f64::max);
+            // Use per-slot limits if set, otherwise auto
+            let y_min = slot.y_min.unwrap_or(if auto_min.is_finite() { auto_min } else { 0.0 });
+            let y_max = slot.y_max.unwrap_or(if auto_max.is_finite() { auto_max } else { 1.0 });
+            let points = if normalize {
+                let range = y_max - y_min;
+                let safe_range = if range == 0.0 { 1.0 } else { range };
+                slot.data
+                    .iter()
+                    .enumerate()
+                    .map(|(i, v)| {
+                        let normalized = (v - y_min) / safe_range;
+                        (i as f64, normalized)
+                    })
+                    .collect()
+            } else {
+                slot.data.iter().enumerate().map(|(i, v)| (i as f64, *v)).collect()
+            };
+            SlotRender { points, y_min, y_max }
+        })
+        .collect();
+
+    let (x_lo, x_hi) = if !app.plot_slots.is_empty() {
+        let max_len = app.plot_slots.iter()
+            .map(|s| s.data.len())
+            .max()
+            .unwrap_or(0)
+            .max(app.plot_data.len());
+        if app.plot_x_max > 0.0 {
+            (app.plot_x_min, app.plot_x_max)
+        } else if max_len > crate::app::PLOT_WINDOW {
+            ((max_len - crate::app::PLOT_WINDOW) as f64, max_len as f64)
+        } else {
+            (0.0, max_len as f64)
+        }
+    } else {
+        app.signal_x_bounds()
+    };
+
+    let (y_lo, y_hi) = if app.plot_slots.len() > 1 {
+        // Multi-key: always normalized 0-1, per-key Y scales rendered separately
+        (-0.05, 1.05)
+    } else if !app.plot_slots.is_empty() && app.plot_auto_limits {
+        // Single slot, auto: use its actual bounds
+        let all_data: Vec<f64> = app.plot_slots[0].data.iter().copied()
+            .filter(|v| v.is_finite()).collect();
+        if all_data.is_empty() {
+            (0.0, 1.0)
+        } else {
+            let y_min = all_data.iter().copied().fold(f64::INFINITY, f64::min);
+            let y_max = all_data.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+            let range = y_max - y_min;
+            let pad = if range == 0.0 { 1.0 } else { range * 0.1 };
+            (y_min - pad, y_max + pad)
+        }
+    } else if app.plot_auto_limits {
         app.auto_signal_bounds()
     } else {
         (app.plot_y_min, app.plot_y_max)
@@ -370,12 +462,37 @@ fn draw_signal_chart(frame: &mut Frame, app: &mut App, area: Rect, title: &str, 
     let full_title = format!("{}{} ", title, hover_suffix);
 
     let marker = safe_marker(area);
-    let datasets = vec![Dataset::default()
-        .name(format!("{} values", app.plot_data.len()))
-        .marker(marker)
-        .graph_type(GraphType::Line)
-        .style(Style::default().fg(Color::Cyan))
-        .data(&data_points)];
+
+    // Build datasets: one per plot slot (normalized), or primary if no slots
+    let mut datasets = Vec::new();
+    if app.plot_slots.is_empty() {
+        // Fallback: single dataset from primary plot_data
+        datasets.push(Dataset::default()
+            .name(format!("{} values", app.plot_data.len()))
+            .marker(marker)
+            .graph_type(GraphType::Line)
+            .style(Style::default().fg(Color::Cyan))
+            .data(&primary_points));
+    } else {
+        for (i, slot) in app.plot_slots.iter().enumerate() {
+            if !slot.data.is_empty() {
+                let sr = &slot_renders[i];
+                // Truncate key name to keep legend compact
+                let short_name = if slot.key_name.len() > 12 {
+                    format!("{}...", &slot.key_name[..12])
+                } else {
+                    slot.key_name.clone()
+                };
+                let legend_name = format!("{} [{:.0}..{:.0}]", short_name, sr.y_min, sr.y_max);
+                datasets.push(Dataset::default()
+                    .name(legend_name)
+                    .marker(marker)
+                    .graph_type(GraphType::Line)
+                    .style(Style::default().fg(slot.color))
+                    .data(&sr.points));
+            }
+        }
+    }
 
     let chart = Chart::new(datasets)
         .block(
@@ -394,7 +511,12 @@ fn draw_signal_chart(frame: &mut Frame, app: &mut App, area: Rect, title: &str, 
                     Line::from(format!("{:.0}", x_hi)),
                 ]),
         )
-        .y_axis(
+        .y_axis(if app.plot_slots.len() > 1 {
+            // Multi-key: hide default Y-axis labels, we'll draw per-key ones
+            Axis::default()
+                .bounds([y_lo, y_hi])
+                .labels(vec![Line::from(""), Line::from(""), Line::from("")])
+        } else {
             Axis::default()
                 .title("Value")
                 .bounds([y_lo, y_hi])
@@ -402,19 +524,64 @@ fn draw_signal_chart(frame: &mut Frame, app: &mut App, area: Rect, title: &str, 
                     Line::from(format!("{:.2}", y_lo)),
                     Line::from(format!("{:.2}", (y_lo + y_hi) / 2.0)),
                     Line::from(format!("{:.2}", y_hi)),
-                ]),
-        );
+                ])
+        })
+        .legend_position(Some(ratatui::widgets::LegendPosition::TopRight))
+        .hidden_legend_constraints((Constraint::Min(0), Constraint::Min(0)));
 
     frame.render_widget(chart, area);
 
     // Store chart inner area for mouse hit testing (inside borders)
     let inner = Block::default().borders(Borders::ALL).inner(area);
     // Approximate: ratatui chart uses ~7 chars for y-axis labels, 2 for x-axis
-    let chart_x = inner.x + 7;
+    let y_label_width: u16 = if app.plot_slots.len() > 1 { 1 } else { 7 };
+    let chart_x = inner.x + y_label_width;
     let chart_y = inner.y;
-    let chart_w = inner.width.saturating_sub(7);
+    let chart_w = inner.width.saturating_sub(y_label_width);
     let chart_h = inner.height.saturating_sub(2);
     app.signal_chart_area = Some((chart_x, chart_y, chart_w, chart_h));
+
+    // Draw per-key Y-axis scales when multiple keys are plotted
+    if app.plot_slots.len() > 1 && !slot_renders.is_empty() {
+        let num_slots = slot_renders.len().min(app.plot_slots.len());
+        // Each slot gets a column of Y labels on the left side
+        let label_width = 9u16; // enough for "-99999.9"
+        let buf_area = frame.area();
+
+        for (i, sr) in slot_renders.iter().enumerate().take(num_slots) {
+            let color = app.plot_slots[i].color;
+            let col_x = inner.x + (i as u16) * label_width;
+            if col_x + label_width > buf_area.width { break; }
+
+            // Top: Y max
+            if chart_y > 0 && chart_y < buf_area.height {
+                frame.render_widget(
+                    Paragraph::new(format!("{:.1}", sr.y_max))
+                        .style(Style::default().fg(color)),
+                    Rect::new(col_x, chart_y, label_width, 1),
+                );
+            }
+            // Middle: midpoint
+            let mid_y = chart_y + chart_h / 2;
+            if mid_y < buf_area.height {
+                let mid_val = (sr.y_min + sr.y_max) / 2.0;
+                frame.render_widget(
+                    Paragraph::new(format!("{:.1}", mid_val))
+                        .style(Style::default().fg(color)),
+                    Rect::new(col_x, mid_y, label_width, 1),
+                );
+            }
+            // Bottom: Y min
+            let bot_y = chart_y + chart_h.saturating_sub(1);
+            if bot_y < buf_area.height && bot_y != mid_y {
+                frame.render_widget(
+                    Paragraph::new(format!("{:.1}", sr.y_min))
+                        .style(Style::default().fg(color)),
+                    Rect::new(col_x, bot_y, label_width, 1),
+                );
+            }
+        }
+    }
 
     // Draw crosshair tick marks if hovering in signal chart
     if !app.hover_in_fft {
@@ -429,47 +596,91 @@ fn draw_fft_chart(frame: &mut Frame, app: &mut App, area: Rect, _border_color: C
         return;
     }
 
+    // Compute FFT for primary data
     let display_data = app.fft_display_data();
-    let fft_points: Vec<(f64, f64)> = display_data
+    let primary_fft_points: Vec<(f64, f64)> = display_data
         .iter()
         .enumerate()
         .map(|(i, v)| (i as f64, *v))
         .collect();
 
-    let (x_lo, x_hi) = app.fft_x_bounds();
+    // Compute FFT per slot
+    let slot_fft_data: Vec<Vec<f64>> = app.plot_slots.iter().map(|slot| {
+        let mut magnitudes = crate::app::compute_fft_magnitude(&slot.data);
+        if app.fft_log_scale {
+            for v in &mut magnitudes {
+                *v = if *v > 0.0 { v.log10() } else { -10.0 };
+            }
+        }
+        magnitudes
+    }).collect();
+    let slot_fft_points: Vec<Vec<(f64, f64)>> = slot_fft_data.iter().map(|data| {
+        data.iter().enumerate().map(|(i, v)| (i as f64, *v)).collect()
+    }).collect();
+
+    // Compute unified bounds across all FFT data
+    let (x_lo, x_hi) = if !app.plot_slots.is_empty() {
+        let max_bins = slot_fft_data.iter().map(|d| d.len()).max().unwrap_or(0)
+            .max(display_data.len());
+        if app.fft_x_max > 0.0 { (app.fft_x_min, app.fft_x_max) }
+        else { (0.0, max_bins as f64) }
+    } else {
+        app.fft_x_bounds()
+    };
 
     let (y_lo, y_hi) = if app.fft_auto_limits {
-        app.auto_fft_bounds()
+        let all_fft: Vec<f64> = slot_fft_data.iter()
+            .flat_map(|d| d.iter().copied())
+            .chain(display_data.iter().copied())
+            .filter(|v| v.is_finite())
+            .collect();
+        if all_fft.is_empty() { (0.0, 1.0) }
+        else {
+            let y_min = all_fft.iter().copied().fold(f64::INFINITY, f64::min);
+            let y_max = all_fft.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+            let range = y_max - y_min;
+            let pad = if range == 0.0 { 1.0 } else { range * 0.1 };
+            (y_min - pad, y_max + pad)
+        }
     } else {
         (app.fft_y_min, app.fft_y_max)
     };
 
-    // Highlight border if this sub-plot is focused
-    let chart_border = if app.plot_focus == PlotFocus::FFT {
-        Color::Cyan
-    } else {
-        Color::DarkGray
-    };
+    let chart_border = if app.plot_focus == PlotFocus::FFT { Color::Cyan } else { Color::DarkGray };
 
     let scale_label = if app.fft_log_scale { "log" } else { "linear" };
     let hover_suffix = if app.hover_in_fft {
         if let (Some(hx), Some(hy)) = (app.hover_data_x, app.hover_data_y) {
             format!(" bin:{:.1} mag:{:.2}", hx, hy)
-        } else {
-            String::new()
-        }
-    } else {
-        String::new()
-    };
+        } else { String::new() }
+    } else { String::new() };
     let fft_title = format!(" FFT Magnitude ({}){} ", scale_label, hover_suffix);
 
     let marker = safe_marker(area);
-    let datasets = vec![Dataset::default()
-        .name(format!("{} bins", display_data.len()))
-        .marker(marker)
-        .graph_type(GraphType::Line)
-        .style(Style::default().fg(Color::Yellow))
-        .data(&fft_points)];
+    let mut datasets = Vec::new();
+
+    if app.plot_slots.is_empty() {
+        datasets.push(Dataset::default()
+            .name(format!("{} bins", display_data.len()))
+            .marker(marker)
+            .graph_type(GraphType::Line)
+            .style(Style::default().fg(Color::Yellow))
+            .data(&primary_fft_points));
+    } else {
+        for (i, slot) in app.plot_slots.iter().enumerate() {
+            if i < slot_fft_points.len() && !slot_fft_points[i].is_empty() {
+                let short_name = if slot.key_name.len() > 12 {
+                    format!("{}...", &slot.key_name[..12])
+                } else { slot.key_name.clone() };
+                datasets.push(Dataset::default()
+                    .name(short_name)
+                    .marker(marker)
+                    .graph_type(GraphType::Line)
+                    .style(Style::default().fg(slot.color))
+                    .data(&slot_fft_points[i]));
+            }
+        }
+    }
 
     let y_title = if app.fft_log_scale { "log10(Mag)" } else { "Magnitude" };
 
@@ -499,7 +710,9 @@ fn draw_fft_chart(frame: &mut Frame, app: &mut App, area: Rect, _border_color: C
                     Line::from(format!("{:.2}", (y_lo + y_hi) / 2.0)),
                     Line::from(format!("{:.2}", y_hi)),
                 ]),
-        );
+        )
+        .legend_position(Some(ratatui::widgets::LegendPosition::TopRight))
+        .hidden_legend_constraints((Constraint::Min(0), Constraint::Min(0)));
 
     frame.render_widget(chart, area);
 
@@ -754,12 +967,13 @@ fn draw_help_popup(frame: &mut Frame, app: &App, area: Rect) {
 }
 
 fn draw_plot_limit_popup(frame: &mut Frame, app: &App, area: Rect) {
-    let popup_area = centered_rect(50, 8, area);
+    let popup_height = (app.edit_fields.len() as u16) + 5; // fields + title + blank + buttons + borders
+    let popup_area = centered_rect(50, popup_height, area);
     frame.render_widget(Clear, popup_area);
 
     let mut lines: Vec<Line> = Vec::new();
     lines.push(Line::from(Span::styled(
-        "Set Y-Axis Limits",
+        "Plot Settings",
         Style::default()
             .fg(Color::Yellow)
             .add_modifier(Modifier::BOLD),
