@@ -288,7 +288,7 @@ fn run_app(
     app.refresh_keys(client);
     app.connected = client.is_connected();
 
-    let mut stream_listener: Option<StreamListener> = None;
+    let mut stream_listeners: Vec<StreamListener> = Vec::new();
     let mut signal_generator: Option<SignalGenerator> = None;
 
     loop {
@@ -358,33 +358,47 @@ fn run_app(
                     InputMode::Normal => {
                         handle_normal_input(&mut app, client, key.code, key.modifiers);
 
-                        // Toggle plot visibility with 'p'
+                        // Toggle key in plot slots with 'p'
                         if key.code == KeyCode::Char('p') {
-                            app.plot_visible = !app.plot_visible;
-                            let state = if app.plot_visible { "shown" } else { "hidden" };
-                            app.status_message = format!("Plot: {}", state);
+                            if let Some(k) = app.selected_key_name().map(|s| s.to_string()) {
+                                let added = app.toggle_plot_slot(&k);
+                                if added {
+                                    // Load current data into the new slot
+                                    if let Some(ref value) = app.current_value {
+                                        app.update_slot_data(&k, &value.clone());
+                                    }
+                                    app.plot_visible = true;
+                                    app.status_message = format!("Plot: added '{}' ({}/{})", k, app.plot_slots.len(), app::MAX_PLOT_SLOTS);
+                                } else {
+                                    if app.plot_slots.is_empty() {
+                                        app.plot_visible = false;
+                                    }
+                                    app.status_message = format!("Plot: removed '{}'", k);
+                                }
+                            }
                         }
 
                         // Toggle stream listener with 'l'
                         if key.code == KeyCode::Char('l') && app.is_viewing_stream() {
-                            if stream_listener.is_some() {
-                                // Stop
-                                if let Some(mut sl) = stream_listener.take() {
+                            if let Some(k) = app.selected_key_name().map(|s| s.to_string()) {
+                                // Check if already listening on this key
+                                if let Some(idx) = stream_listeners.iter().position(|sl| sl.watching_key == k) {
+                                    // Stop this specific listener
+                                    let mut sl = stream_listeners.remove(idx);
                                     sl.stop();
-                                }
-                                app.status_message = "Stream: stopped".to_string();
-                            } else {
-                                // Start
-                                if let (Some(k), Some(lid)) = (
-                                    app.selected_key_name().map(|s| s.to_string()),
-                                    app.last_stream_id.clone(),
-                                ) {
+                                    app.status_message = format!("Stream: stopped '{}'", k);
+                                } else {
+                                    // Start new listener
+                                    let lid = app.last_stream_id.clone().unwrap_or_else(|| "$".to_string());
                                     let key_url = client.url_for_key(&k).to_string();
-                                    stream_listener =
-                                        StreamListener::start(&key_url, &k, &lid, app.db);
-                                    if stream_listener.is_some() {
-                                        app.status_message =
-                                            format!("Stream: listening on '{}'", k);
+                                    if let Some(sl) = StreamListener::start(&key_url, &k, &lid, app.db) {
+                                        // Evict oldest if at capacity
+                                        if stream_listeners.len() >= app::MAX_PLOT_SLOTS {
+                                            let mut oldest = stream_listeners.remove(0);
+                                            oldest.stop();
+                                        }
+                                        stream_listeners.push(sl);
+                                        app.status_message = format!("Stream: listening on '{}' ({}/{})", k, stream_listeners.len(), app::MAX_PLOT_SLOTS);
                                     }
                                 }
                             }
@@ -404,12 +418,9 @@ fn run_app(
                             }
                         }
 
-                        // Stop listener/generator if user navigated to a different key
+                        // Stop signal generator if user navigated to a different key
                         let new_key = app.selected_key_name().map(|s| s.to_string());
                         if prev_key != new_key {
-                            if let Some(mut sl) = stream_listener.take() {
-                                sl.stop();
-                            }
                             if let Some(mut sg) = signal_generator.take() {
                                 sg.stop();
                             }
@@ -422,21 +433,24 @@ fn run_app(
         // Check for completed background FFT
         app.poll_fft();
 
-        // Drain any new stream entries from the background listener
-        if let Some(ref listener) = stream_listener {
+        // Drain new stream entries from all background listeners
+        for listener in &stream_listeners {
             let mut total_new = 0;
             while let Ok(entries) = listener.rx.try_recv() {
                 total_new += entries.len();
+                // Update the plot slot for this key
+                app.append_slot_stream_entries(&listener.watching_key, &entries);
+                // Also update main app state if this is the currently viewed key
                 app.append_stream_entries(entries);
             }
             if total_new > 0 {
-                app.status_message = format!("Stream: +{} entries (live)", total_new);
+                app.status_message = format!("Stream: +{} entries on '{}' (live)", total_new, listener.watching_key);
             }
         }
 
         if !app.running {
             drop(signal_generator);
-            drop(stream_listener);
+            drop(stream_listeners);
             return Ok(());
         }
     }

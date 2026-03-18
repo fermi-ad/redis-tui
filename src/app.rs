@@ -1,8 +1,28 @@
 use crate::data::{DataType, Endianness, decode_blob, encode_values, is_binary};
 use crate::redis_client::{KeyInfo, MultiRedisClient, RedisValue, StreamEntry};
+use ratatui::style::Color;
 use ratatui::widgets::ListState;
 use rustfft::{FftPlanner, num_complex::Complex};
 use std::sync::mpsc;
+
+/// Maximum number of keys that can be plotted simultaneously
+pub const MAX_PLOT_SLOTS: usize = 4;
+
+/// Colors assigned to each plot slot
+pub const PLOT_COLORS: [Color; MAX_PLOT_SLOTS] = [
+    Color::Cyan,
+    Color::Yellow,
+    Color::Green,
+    Color::Magenta,
+];
+
+/// A slot in the multi-key plot FIFO
+#[derive(Clone)]
+pub struct PlotSlot {
+    pub key_name: String,
+    pub data: Vec<f64>,
+    pub color: Color,
+}
 
 #[derive(Debug, Clone, PartialEq)]
 #[allow(dead_code)]
@@ -91,7 +111,8 @@ pub struct App {
     // Data plot
     pub data_type: DataType,
     pub endianness: Endianness,
-    pub plot_data: Vec<f64>,
+    pub plot_data: Vec<f64>,            // primary key's plot data (backward compat)
+    pub plot_slots: Vec<PlotSlot>,      // multi-key plot FIFO (up to MAX_PLOT_SLOTS)
     pub plot_auto_limits: bool,
     pub plot_y_min: f64,
     pub plot_y_max: f64,
@@ -187,6 +208,7 @@ impl App {
             data_type: DataType::UInt8,
             endianness: Endianness::Little,
             plot_data: Vec::new(),
+            plot_slots: Vec::new(),
             plot_auto_limits: true,
             plot_y_min: 0.0,
             plot_y_max: 1.0,
@@ -247,6 +269,114 @@ impl App {
             signal_gen_focus: 0,
             signal_gen_wave_idx: 0,
             signal_gen_dtype_idx: 7, // float32 index in DataType::all()
+        }
+    }
+
+    /// Toggle a key in the plot slots. Returns true if added, false if removed.
+    pub fn toggle_plot_slot(&mut self, key_name: &str) -> bool {
+        // If already plotted, remove it
+        if let Some(idx) = self.plot_slots.iter().position(|s| s.key_name == key_name) {
+            self.plot_slots.remove(idx);
+            // Reassign colors to keep them sequential
+            for (i, slot) in self.plot_slots.iter_mut().enumerate() {
+                slot.color = PLOT_COLORS[i];
+            }
+            return false;
+        }
+        // If at capacity, evict the oldest (first) slot
+        if self.plot_slots.len() >= MAX_PLOT_SLOTS {
+            self.plot_slots.remove(0);
+            for (i, slot) in self.plot_slots.iter_mut().enumerate() {
+                slot.color = PLOT_COLORS[i];
+            }
+        }
+        // Add new slot
+        let color = PLOT_COLORS[self.plot_slots.len()];
+        self.plot_slots.push(PlotSlot {
+            key_name: key_name.to_string(),
+            data: Vec::new(),
+            color,
+        });
+        true
+    }
+
+    /// Check if a key is currently in the plot slots
+    pub fn is_key_plotted(&self, key_name: &str) -> bool {
+        self.plot_slots.iter().any(|s| s.key_name == key_name)
+    }
+
+    /// Get the color assigned to a plotted key, if any
+    pub fn plot_color_for_key(&self, key_name: &str) -> Option<Color> {
+        self.plot_slots.iter().find(|s| s.key_name == key_name).map(|s| s.color)
+    }
+
+    /// Update plot data for a specific slot by key name
+    pub fn update_slot_data(&mut self, key_name: &str, value: &RedisValue) {
+        if let Some(slot) = self.plot_slots.iter_mut().find(|s| s.key_name == key_name) {
+            slot.data = match value {
+                RedisValue::String(bytes) => {
+                    decode_blob(bytes, self.data_type, self.endianness)
+                }
+                RedisValue::Stream(entries) => {
+                    extract_stream_plot_data(entries, self.data_type, self.endianness)
+                }
+                RedisValue::List(items) => {
+                    let mut data = Vec::new();
+                    for item in items {
+                        if let Ok(s) = std::str::from_utf8(item) {
+                            if let Ok(v) = s.parse::<f64>() {
+                                data.push(v);
+                                continue;
+                            }
+                        }
+                        data.extend(decode_blob(item, self.data_type, self.endianness));
+                    }
+                    data
+                }
+                RedisValue::ZSet(pairs) => {
+                    pairs.iter().map(|(_, score)| *score).collect()
+                }
+                RedisValue::Hash(pairs) => {
+                    let mut data = Vec::new();
+                    for (_, val) in pairs {
+                        if let Ok(s) = std::str::from_utf8(val) {
+                            if let Ok(v) = s.parse::<f64>() {
+                                data.push(v);
+                                continue;
+                            }
+                        }
+                        data.extend(decode_blob(val, self.data_type, self.endianness));
+                    }
+                    data
+                }
+                _ => Vec::new(),
+            };
+            // Sanitize
+            for v in &mut slot.data {
+                if !v.is_finite() {
+                    *v = 0.0;
+                }
+            }
+        }
+    }
+
+    /// Append stream entries to a specific plot slot
+    pub fn append_slot_stream_entries(&mut self, key_name: &str, new_entries: &[StreamEntry]) {
+        if let Some(slot) = self.plot_slots.iter_mut().find(|s| s.key_name == key_name) {
+            // Re-extract plot data from the newest entry
+            if let Some(entry) = new_entries.last() {
+                for (fname, fval) in &entry.fields {
+                    if fname.starts_with('_') {
+                        slot.data = decode_blob(fval, self.data_type, self.endianness);
+                        for v in &mut slot.data {
+                            if !v.is_finite() {
+                                *v = 0.0;
+                            }
+                        }
+                        break;
+                    }
+                }
+            }
         }
     }
 
@@ -1456,4 +1586,108 @@ fn compute_fft_magnitude(data: &[f64]) -> Vec<f64> {
         .iter()
         .map(|c| c.norm() * inv_n)
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn toggle_plot_slot_adds_key() {
+        let mut app = App::new();
+        let added = app.toggle_plot_slot("mykey");
+        assert!(added);
+        assert_eq!(app.plot_slots.len(), 1);
+        assert_eq!(app.plot_slots[0].key_name, "mykey");
+        assert_eq!(app.plot_slots[0].color, PLOT_COLORS[0]);
+    }
+
+    #[test]
+    fn toggle_plot_slot_removes_key() {
+        let mut app = App::new();
+        app.toggle_plot_slot("mykey");
+        let added = app.toggle_plot_slot("mykey");
+        assert!(!added);
+        assert!(app.plot_slots.is_empty());
+    }
+
+    #[test]
+    fn toggle_plot_slot_fifo_eviction() {
+        let mut app = App::new();
+        app.toggle_plot_slot("key1");
+        app.toggle_plot_slot("key2");
+        app.toggle_plot_slot("key3");
+        app.toggle_plot_slot("key4");
+        assert_eq!(app.plot_slots.len(), 4);
+
+        // Adding a 5th should evict "key1"
+        app.toggle_plot_slot("key5");
+        assert_eq!(app.plot_slots.len(), 4);
+        assert_eq!(app.plot_slots[0].key_name, "key2");
+        assert_eq!(app.plot_slots[3].key_name, "key5");
+    }
+
+    #[test]
+    fn toggle_plot_slot_colors_reassigned_on_remove() {
+        let mut app = App::new();
+        app.toggle_plot_slot("key1");
+        app.toggle_plot_slot("key2");
+        app.toggle_plot_slot("key3");
+
+        // Remove the middle key
+        app.toggle_plot_slot("key2");
+        assert_eq!(app.plot_slots.len(), 2);
+        assert_eq!(app.plot_slots[0].key_name, "key1");
+        assert_eq!(app.plot_slots[0].color, PLOT_COLORS[0]);
+        assert_eq!(app.plot_slots[1].key_name, "key3");
+        assert_eq!(app.plot_slots[1].color, PLOT_COLORS[1]);
+    }
+
+    #[test]
+    fn is_key_plotted() {
+        let mut app = App::new();
+        assert!(!app.is_key_plotted("mykey"));
+        app.toggle_plot_slot("mykey");
+        assert!(app.is_key_plotted("mykey"));
+    }
+
+    #[test]
+    fn plot_color_for_key_returns_correct_color() {
+        let mut app = App::new();
+        app.toggle_plot_slot("key1");
+        app.toggle_plot_slot("key2");
+        assert_eq!(app.plot_color_for_key("key1"), Some(PLOT_COLORS[0]));
+        assert_eq!(app.plot_color_for_key("key2"), Some(PLOT_COLORS[1]));
+        assert_eq!(app.plot_color_for_key("nonexistent"), None);
+    }
+
+    #[test]
+    fn update_slot_data_with_string_value() {
+        let mut app = App::new();
+        app.toggle_plot_slot("mykey");
+        let value = RedisValue::String(vec![0x01, 0x02, 0x03]);
+        app.update_slot_data("mykey", &value);
+        assert_eq!(app.plot_slots[0].data, vec![1.0, 2.0, 3.0]);
+    }
+
+    #[test]
+    fn fifo_eviction_preserves_data() {
+        let mut app = App::new();
+        for i in 1..=4 {
+            let name = format!("key{}", i);
+            app.toggle_plot_slot(&name);
+            let value = RedisValue::String(vec![i as u8]);
+            app.update_slot_data(&name, &value);
+        }
+
+        // Add 5th, key1 evicted
+        app.toggle_plot_slot("key5");
+        let value = RedisValue::String(vec![5]);
+        app.update_slot_data("key5", &value);
+
+        assert_eq!(app.plot_slots[0].key_name, "key2");
+        assert_eq!(app.plot_slots[0].data, vec![2.0]);
+        assert_eq!(app.plot_slots[3].key_name, "key5");
+        assert_eq!(app.plot_slots[3].data, vec![5.0]);
+    }
 }

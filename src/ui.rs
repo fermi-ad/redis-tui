@@ -142,12 +142,19 @@ fn draw_key_list(frame: &mut Frame, app: &mut App, area: Rect) {
             };
 
             let is_collision = collision_keys.contains(key.as_str());
+            let plot_color = app.plot_color_for_key(key);
             let mut spans = vec![
                 Span::styled(
                     format!("{:<6}", type_badge.0),
                     Style::default().fg(type_badge.1),
                 ),
             ];
+            // Show plot indicator with slot color
+            if let Some(color) = plot_color {
+                spans.push(Span::styled("\u{25CF} ", Style::default().fg(color)));
+            } else {
+                spans.push(Span::raw("  "));
+            }
             if is_collision {
                 spans.push(Span::styled("! ", Style::default().fg(Color::Yellow)));
             }
@@ -268,8 +275,9 @@ fn draw_data_plot(frame: &mut Frame, app: &mut App, area: Rect) {
         focused_limits, fft_label, log_label, focus_label
     );
 
-    if app.plot_data.is_empty() {
-        let msg = Paragraph::new("No plottable data. Select a key with binary data.")
+    let has_slot_data = app.plot_slots.iter().any(|s| !s.data.is_empty());
+    if app.plot_data.is_empty() && !has_slot_data {
+        let msg = Paragraph::new("No plottable data. Press [p] on a key to add it to the plot.")
             .style(Style::default().fg(Color::DarkGray))
             .block(
                 Block::default()
@@ -333,17 +341,65 @@ fn draw_signal_chart(frame: &mut Frame, app: &mut App, area: Rect, title: &str, 
         return;
     }
 
-    let data_points: Vec<(f64, f64)> = app
+    // Build data points for the primary key (backward compat)
+    let primary_points: Vec<(f64, f64)> = app
         .plot_data
         .iter()
         .enumerate()
         .map(|(i, v)| (i as f64, *v))
         .collect();
 
-    let (x_lo, x_hi) = app.signal_x_bounds();
+    // Build data points for each plot slot
+    let slot_points: Vec<Vec<(f64, f64)>> = app
+        .plot_slots
+        .iter()
+        .map(|slot| {
+            slot.data
+                .iter()
+                .enumerate()
+                .map(|(i, v)| (i as f64, *v))
+                .collect()
+        })
+        .collect();
+
+    let (x_lo, x_hi) = if !app.plot_slots.is_empty() {
+        // Use max data length across all slots for x bounds
+        let max_len = app.plot_slots.iter()
+            .map(|s| s.data.len())
+            .max()
+            .unwrap_or(0)
+            .max(app.plot_data.len());
+        if app.plot_x_max > 0.0 {
+            (app.plot_x_min, app.plot_x_max)
+        } else if max_len > crate::app::PLOT_WINDOW {
+            ((max_len - crate::app::PLOT_WINDOW) as f64, max_len as f64)
+        } else {
+            (0.0, max_len as f64)
+        }
+    } else {
+        app.signal_x_bounds()
+    };
 
     let (y_lo, y_hi) = if app.plot_auto_limits {
-        app.auto_signal_bounds()
+        if !app.plot_slots.is_empty() {
+            // Unified auto bounds across all slot data
+            let all_data: Vec<f64> = app.plot_slots.iter()
+                .flat_map(|s| s.data.iter().copied())
+                .chain(app.plot_data.iter().copied())
+                .filter(|v| v.is_finite())
+                .collect();
+            if all_data.is_empty() {
+                (0.0, 1.0)
+            } else {
+                let y_min = all_data.iter().copied().fold(f64::INFINITY, f64::min);
+                let y_max = all_data.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+                let range = y_max - y_min;
+                let pad = if range == 0.0 { 1.0 } else { range * 0.1 };
+                (y_min - pad, y_max + pad)
+            }
+        } else {
+            app.auto_signal_bounds()
+        }
     } else {
         (app.plot_y_min, app.plot_y_max)
     };
@@ -370,12 +426,29 @@ fn draw_signal_chart(frame: &mut Frame, app: &mut App, area: Rect, title: &str, 
     let full_title = format!("{}{} ", title, hover_suffix);
 
     let marker = safe_marker(area);
-    let datasets = vec![Dataset::default()
-        .name(format!("{} values", app.plot_data.len()))
-        .marker(marker)
-        .graph_type(GraphType::Line)
-        .style(Style::default().fg(Color::Cyan))
-        .data(&data_points)];
+
+    // Build datasets: one per plot slot, plus primary if no slots
+    let mut datasets = Vec::new();
+    if app.plot_slots.is_empty() {
+        // Fallback: single dataset from primary plot_data
+        datasets.push(Dataset::default()
+            .name(format!("{} values", app.plot_data.len()))
+            .marker(marker)
+            .graph_type(GraphType::Line)
+            .style(Style::default().fg(Color::Cyan))
+            .data(&primary_points));
+    } else {
+        for (i, slot) in app.plot_slots.iter().enumerate() {
+            if !slot.data.is_empty() {
+                datasets.push(Dataset::default()
+                    .name(slot.key_name.clone())
+                    .marker(marker)
+                    .graph_type(GraphType::Line)
+                    .style(Style::default().fg(slot.color))
+                    .data(&slot_points[i]));
+            }
+        }
+    }
 
     let chart = Chart::new(datasets)
         .block(
@@ -403,7 +476,8 @@ fn draw_signal_chart(frame: &mut Frame, app: &mut App, area: Rect, title: &str, 
                     Line::from(format!("{:.2}", (y_lo + y_hi) / 2.0)),
                     Line::from(format!("{:.2}", y_hi)),
                 ]),
-        );
+        )
+        .legend_position(Some(ratatui::widgets::LegendPosition::TopRight));
 
     frame.render_widget(chart, area);
 
