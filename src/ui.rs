@@ -349,21 +349,43 @@ fn draw_signal_chart(frame: &mut Frame, app: &mut App, area: Rect, title: &str, 
         .map(|(i, v)| (i as f64, *v))
         .collect();
 
-    // Build data points for each plot slot
-    let slot_points: Vec<Vec<(f64, f64)>> = app
+    // Normalize each slot's data independently to 0.0-1.0 for individual Y-axes.
+    // Each waveform is auto-scaled to its own min/max range.
+    // Legend shows key name with actual [min..max] range.
+    struct SlotRender {
+        points: Vec<(f64, f64)>,
+        y_min: f64,
+        y_max: f64,
+    }
+    let slot_renders: Vec<SlotRender> = app
         .plot_slots
         .iter()
         .map(|slot| {
-            slot.data
+            let y_min = slot.data.iter().copied()
+                .filter(|v| v.is_finite())
+                .fold(f64::INFINITY, f64::min);
+            let y_max = slot.data.iter().copied()
+                .filter(|v| v.is_finite())
+                .fold(f64::NEG_INFINITY, f64::max);
+            let range = y_max - y_min;
+            let safe_range = if !range.is_finite() || range == 0.0 { 1.0 } else { range };
+            let points = slot.data
                 .iter()
                 .enumerate()
-                .map(|(i, v)| (i as f64, *v))
-                .collect()
+                .map(|(i, v)| {
+                    let normalized = if safe_range == 1.0 && !range.is_finite() {
+                        0.5 // no valid data
+                    } else {
+                        (v - y_min) / safe_range
+                    };
+                    (i as f64, normalized)
+                })
+                .collect();
+            SlotRender { points, y_min, y_max }
         })
         .collect();
 
     let (x_lo, x_hi) = if !app.plot_slots.is_empty() {
-        // Use max data length across all slots for x bounds
         let max_len = app.plot_slots.iter()
             .map(|s| s.data.len())
             .max()
@@ -380,26 +402,12 @@ fn draw_signal_chart(frame: &mut Frame, app: &mut App, area: Rect, title: &str, 
         app.signal_x_bounds()
     };
 
-    let (y_lo, y_hi) = if app.plot_auto_limits {
-        if !app.plot_slots.is_empty() {
-            // Unified auto bounds across all slot data
-            let all_data: Vec<f64> = app.plot_slots.iter()
-                .flat_map(|s| s.data.iter().copied())
-                .chain(app.plot_data.iter().copied())
-                .filter(|v| v.is_finite())
-                .collect();
-            if all_data.is_empty() {
-                (0.0, 1.0)
-            } else {
-                let y_min = all_data.iter().copied().fold(f64::INFINITY, f64::min);
-                let y_max = all_data.iter().copied().fold(f64::NEG_INFINITY, f64::max);
-                let range = y_max - y_min;
-                let pad = if range == 0.0 { 1.0 } else { range * 0.1 };
-                (y_min - pad, y_max + pad)
-            }
-        } else {
-            app.auto_signal_bounds()
-        }
+    // When multiple slots: Y-axis is normalized 0.0-1.0
+    // When single/no slots: use original auto/manual bounds
+    let (y_lo, y_hi) = if !app.plot_slots.is_empty() {
+        (-0.05, 1.05) // slight padding around normalized range
+    } else if app.plot_auto_limits {
+        app.auto_signal_bounds()
     } else {
         (app.plot_y_min, app.plot_y_max)
     };
@@ -427,7 +435,7 @@ fn draw_signal_chart(frame: &mut Frame, app: &mut App, area: Rect, title: &str, 
 
     let marker = safe_marker(area);
 
-    // Build datasets: one per plot slot, plus primary if no slots
+    // Build datasets: one per plot slot (normalized), or primary if no slots
     let mut datasets = Vec::new();
     if app.plot_slots.is_empty() {
         // Fallback: single dataset from primary plot_data
@@ -440,12 +448,14 @@ fn draw_signal_chart(frame: &mut Frame, app: &mut App, area: Rect, title: &str, 
     } else {
         for (i, slot) in app.plot_slots.iter().enumerate() {
             if !slot.data.is_empty() {
+                let sr = &slot_renders[i];
+                let legend_name = format!("{} [{:.1}..{:.1}]", slot.key_name, sr.y_min, sr.y_max);
                 datasets.push(Dataset::default()
-                    .name(slot.key_name.clone())
+                    .name(legend_name)
                     .marker(marker)
                     .graph_type(GraphType::Line)
                     .style(Style::default().fg(slot.color))
-                    .data(&slot_points[i]));
+                    .data(&sr.points));
             }
         }
     }
@@ -469,7 +479,7 @@ fn draw_signal_chart(frame: &mut Frame, app: &mut App, area: Rect, title: &str, 
         )
         .y_axis(
             Axis::default()
-                .title("Value")
+                .title(if app.plot_slots.is_empty() { "Value" } else { "Norm" })
                 .bounds([y_lo, y_hi])
                 .labels(vec![
                     Line::from(format!("{:.2}", y_lo)),

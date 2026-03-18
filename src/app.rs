@@ -817,6 +817,65 @@ impl App {
         Ok(())
     }
 
+    /// Open a combined plot settings popup with X and Y limits
+    pub fn start_plot_settings(&mut self) {
+        let (x_min, x_max) = match self.plot_focus {
+            PlotFocus::Signal => self.signal_x_bounds(),
+            PlotFocus::FFT => self.fft_x_bounds(),
+        };
+        let (y_min, y_max) = match self.plot_focus {
+            PlotFocus::Signal => self.auto_signal_bounds(),
+            PlotFocus::FFT => self.auto_fft_bounds(),
+        };
+        let label = match self.plot_focus {
+            PlotFocus::Signal => "Signal",
+            PlotFocus::FFT => "FFT",
+        };
+        self.edit_fields = vec![
+            (format!("{} X Min", label), format!("{:.2}", x_min)),
+            (format!("{} X Max", label), format!("{:.2}", x_max)),
+            (format!("{} Y Min", label), format!("{:.2}", y_min)),
+            (format!("{} Y Max", label), format!("{:.2}", y_max)),
+        ];
+        self.edit_focus = 0;
+        self.input_mode = InputMode::PlotLimit;
+    }
+
+    /// Apply combined plot settings (X + Y limits)
+    pub fn apply_plot_settings(&mut self) -> Result<(), String> {
+        let x_min: f64 = self.edit_fields[0].1.trim().parse()
+            .map_err(|_| "Invalid X Min".to_string())?;
+        let x_max: f64 = self.edit_fields[1].1.trim().parse()
+            .map_err(|_| "Invalid X Max".to_string())?;
+        let y_min: f64 = self.edit_fields[2].1.trim().parse()
+            .map_err(|_| "Invalid Y Min".to_string())?;
+        let y_max: f64 = self.edit_fields[3].1.trim().parse()
+            .map_err(|_| "Invalid Y Max".to_string())?;
+        if x_min >= x_max {
+            return Err("X Min must be less than X Max".to_string());
+        }
+        if y_min >= y_max {
+            return Err("Y Min must be less than Y Max".to_string());
+        }
+        match self.plot_focus {
+            PlotFocus::Signal => {
+                self.plot_x_min = x_min;
+                self.plot_x_max = x_max;
+                self.plot_y_min = y_min;
+                self.plot_y_max = y_max;
+                self.plot_auto_limits = false;
+            }
+            PlotFocus::FFT => {
+                self.fft_x_min = x_min;
+                self.fft_x_max = x_max;
+                self.fft_y_min = y_min;
+                self.fft_y_max = y_max;
+                self.fft_auto_limits = false;
+            }
+        }
+        Ok(())
+    }
+
     pub fn start_set_x_limits(&mut self) {
         let (x_min, x_max) = match self.plot_focus {
             PlotFocus::Signal => self.signal_x_bounds(),

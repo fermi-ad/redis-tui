@@ -530,7 +530,7 @@ fn handle_normal_input(
             app.status_message = "Plot: auto limits".to_string();
         }
         KeyCode::Char('y') => {
-            app.start_set_plot_limits();
+            // Reserved — no longer used for plot limits
         }
         KeyCode::Char('f') => {
             app.toggle_fft();
@@ -570,7 +570,7 @@ fn handle_normal_input(
             app.start_new_key();
         }
         KeyCode::Char('x') => {
-            app.start_set_x_limits();
+            app.start_plot_settings();
         }
         KeyCode::Char('z') => {
             if app.current_key_info.is_some() {
@@ -881,31 +881,22 @@ fn handle_plot_limit_input(app: &mut App, code: KeyCode) {
             }
         }
         KeyCode::Enter => {
-            let is_x_limit = app.edit_fields.first()
-                .map(|(label, _)| label.contains("X Min"))
-                .unwrap_or(false);
-            let result = if is_x_limit {
-                app.apply_x_limits()
+            // Detect if this is the combined 4-field settings popup or a legacy 2-field one
+            let result = if app.edit_fields.len() == 4 {
+                app.apply_plot_settings()
             } else {
-                app.apply_plot_limits()
+                let is_x_limit = app.edit_fields.first()
+                    .map(|(label, _)| label.contains("X Min"))
+                    .unwrap_or(false);
+                if is_x_limit {
+                    app.apply_x_limits()
+                } else {
+                    app.apply_plot_limits()
+                }
             };
             match result {
                 Ok(_) => {
-                    let (label, axis, lo, hi) = if is_x_limit {
-                        match app.plot_focus {
-                            app::PlotFocus::Signal => ("Signal", "X", app.plot_x_min, app.plot_x_max),
-                            app::PlotFocus::FFT => ("FFT", "X", app.fft_x_min, app.fft_x_max),
-                        }
-                    } else {
-                        match app.plot_focus {
-                            app::PlotFocus::Signal => ("Signal", "Y", app.plot_y_min, app.plot_y_max),
-                            app::PlotFocus::FFT => ("FFT", "Y", app.fft_y_min, app.fft_y_max),
-                        }
-                    };
-                    app.status_message = format!(
-                        "{} {} limits: {:.2} to {:.2}",
-                        label, axis, lo, hi
-                    );
+                    app.status_message = "Plot settings applied".to_string();
                     app.input_mode = InputMode::Normal;
                 }
                 Err(e) => {
