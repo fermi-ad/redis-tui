@@ -452,6 +452,7 @@ fn run_app(
 
         // Drain new stream entries from all background listeners (bounded per tick)
         const MAX_DRAIN_PER_TICK: usize = 20;
+        let viewed_key = app.selected_key_name().map(|s| s.to_string());
         for listener in &stream_listeners {
             let mut total_new = 0;
             let mut drained = 0;
@@ -460,7 +461,10 @@ fn run_app(
                     Ok(entries) => {
                         total_new += entries.len();
                         app.append_slot_stream_entries(&listener.watching_key, &entries);
-                        app.append_stream_entries(entries);
+                        // Only update main view state if this listener matches the viewed key
+                        if viewed_key.as_deref() == Some(listener.watching_key.as_str()) {
+                            app.append_stream_entries(entries);
+                        }
                         drained += 1;
                     }
                     Err(_) => break,
@@ -476,16 +480,16 @@ fn run_app(
         app.siggen_keys = signal_generators.iter().map(|sg| sg.watching_key.clone()).collect();
 
         if !app.running {
-            // Join any in-flight FFT thread
-            if let Some(h) = app.fft_handle.take() {
-                let _ = h.join();
-            }
             // Signal all threads to stop in parallel before joining
             for sg in &signal_generators {
                 sg.stop_flag.store(true, Ordering::Relaxed);
             }
             for sl in &stream_listeners {
                 sl.stop_flag.store(true, Ordering::Relaxed);
+            }
+            // Join any in-flight FFT thread
+            if let Some(h) = app.fft_handle.take() {
+                let _ = h.join();
             }
             drop(signal_generators);
             drop(stream_listeners);

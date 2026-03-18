@@ -499,6 +499,7 @@ impl App {
         if let Some(RedisValue::Stream(ref mut entries)) = self.current_value {
             entries.extend(new_entries);
             // Extract plot data from the last entry only (avoids cloning entire stream)
+            let mut found_plot_field = false;
             if let Some(last_entry) = entries.last() {
                 for (fname, fval) in &last_entry.fields {
                     if fname.starts_with('_') {
@@ -508,9 +509,13 @@ impl App {
                                 *v = 0.0;
                             }
                         }
+                        found_plot_field = true;
                         break;
                     }
                 }
+            }
+            if !found_plot_field {
+                self.plot_data.clear();
             }
             self.expanded_stream_entries = vec![false; entries.len()];
             if self.fft_enabled {
@@ -633,6 +638,9 @@ impl App {
             self.fft_data.clear();
             self.fft_computing = false;
             self.fft_rx = None;
+            if let Some(h) = self.fft_handle.take() {
+                let _ = h.join();
+            }
         }
     }
 
@@ -641,6 +649,9 @@ impl App {
             self.fft_data.clear();
             self.fft_computing = false;
             self.fft_rx = None;
+            if let Some(h) = self.fft_handle.take() {
+                let _ = h.join();
+            }
             return;
         }
         // Skip if an FFT is already in flight — the next data update after
