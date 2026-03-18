@@ -46,6 +46,18 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
 
 fn draw_title_bar(frame: &mut Frame, app: &App, area: Rect) {
     let url_text = app.url_display();
+    let version = format!("v{} ", env!("CARGO_PKG_VERSION"));
+    let version_width = version.len() as u16;
+
+    // Split title bar into left (title/url/help) and right (version) so they never overlap
+    let h_split = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([
+            Constraint::Min(0),
+            Constraint::Length(version_width),
+        ])
+        .split(area);
+
     let title = Line::from(vec![
         Span::styled(" Redis TUI ", Style::default().fg(Color::White).bg(Color::Blue).add_modifier(Modifier::BOLD)),
         Span::raw(" "),
@@ -53,7 +65,11 @@ fn draw_title_bar(frame: &mut Frame, app: &App, area: Rect) {
         Span::raw("  "),
         Span::styled("[?]Help [q]Quit", Style::default().fg(Color::DarkGray)),
     ]);
-    frame.render_widget(Paragraph::new(title), area);
+    frame.render_widget(Paragraph::new(title), h_split[0]);
+    frame.render_widget(
+        Paragraph::new(Line::from(Span::styled(version, Style::default().fg(Color::DarkGray)))),
+        h_split[1],
+    );
 }
 
 fn draw_body(frame: &mut Frame, app: &mut App, area: Rect) {
@@ -1171,5 +1187,61 @@ fn format_size(bytes: i64) -> String {
 impl App {
     pub fn url_display(&self) -> String {
         format!("db:{}", self.db)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ratatui::{backend::TestBackend, Terminal};
+
+    #[test]
+    fn version_matches_cargo_toml() {
+        let version = env!("CARGO_PKG_VERSION");
+        assert_eq!(version, "1.1.0");
+    }
+
+    #[test]
+    fn title_bar_contains_version() {
+        let backend = TestBackend::new(80, 3);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let app = App::new();
+
+        terminal
+            .draw(|frame| {
+                let area = Rect::new(0, 0, 80, 1);
+                draw_title_bar(frame, &app, area);
+            })
+            .unwrap();
+
+        let buffer = terminal.backend().buffer().clone();
+        // Collect the first row into a string
+        let row: String = (0..80).map(|x| buffer.cell((x, 0)).unwrap().symbol().chars().next().unwrap_or(' ')).collect();
+
+        assert!(row.contains("Redis TUI"), "title bar should contain 'Redis TUI', got: {}", row);
+        assert!(row.contains("v1.1.0"), "title bar should contain 'v1.1.0' in top-right, got: {}", row);
+        // Version should be right-aligned (near end of row)
+        let version_pos = row.find("v1.1.0").unwrap();
+        assert!(version_pos > 60, "version should be right-aligned, found at position {}", version_pos);
+    }
+
+    #[test]
+    fn title_bar_contains_help_and_quit() {
+        let backend = TestBackend::new(80, 3);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let app = App::new();
+
+        terminal
+            .draw(|frame| {
+                let area = Rect::new(0, 0, 80, 1);
+                draw_title_bar(frame, &app, area);
+            })
+            .unwrap();
+
+        let buffer = terminal.backend().buffer().clone();
+        let row: String = (0..80).map(|x| buffer.cell((x, 0)).unwrap().symbol().chars().next().unwrap_or(' ')).collect();
+
+        assert!(row.contains("[?]Help"), "title bar should contain '[?]Help', got: {}", row);
+        assert!(row.contains("[q]Quit"), "title bar should contain '[q]Quit', got: {}", row);
     }
 }
