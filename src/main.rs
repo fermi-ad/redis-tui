@@ -249,6 +249,8 @@ impl SignalGenerator {
                     std::thread::sleep(Duration::from_millis(500));
                     continue;
                 }
+                // Trim stream to last 100 entries
+                let _ = client.xtrim(&thread_key, 100);
                 // Advance phase by freq cycles so next entry continues seamlessly
                 time_offset += config.frequency;
                 std::thread::sleep(sleep_dur);
@@ -306,9 +308,7 @@ fn run_app(
             if let Event::Key(key) = ev {
                 // Only handle key press events — ignore release/repeat to prevent
                 // input issues with crossterm 0.28+ terminal protocols
-                if key.kind != event::KeyEventKind::Press {
-                    continue;
-                }
+                if key.kind == event::KeyEventKind::Press {
                 match app.input_mode {
                     InputMode::Filter => handle_filter_input(&mut app, client, key.code),
                     InputMode::Confirm => handle_confirm_input(&mut app, client, key.code),
@@ -430,6 +430,7 @@ fn run_app(
                         // No longer stop generators on key navigation — they run independently
                     }
                 }
+            } // if KeyEventKind::Press
             }
         }
 

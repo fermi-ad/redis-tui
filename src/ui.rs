@@ -596,47 +596,91 @@ fn draw_fft_chart(frame: &mut Frame, app: &mut App, area: Rect, _border_color: C
         return;
     }
 
+    // Compute FFT for primary data
     let display_data = app.fft_display_data();
-    let fft_points: Vec<(f64, f64)> = display_data
+    let primary_fft_points: Vec<(f64, f64)> = display_data
         .iter()
         .enumerate()
         .map(|(i, v)| (i as f64, *v))
         .collect();
 
-    let (x_lo, x_hi) = app.fft_x_bounds();
+    // Compute FFT per slot
+    let slot_fft_data: Vec<Vec<f64>> = app.plot_slots.iter().map(|slot| {
+        let mut magnitudes = crate::app::compute_fft_magnitude(&slot.data);
+        if app.fft_log_scale {
+            for v in &mut magnitudes {
+                *v = if *v > 0.0 { v.log10() } else { -10.0 };
+            }
+        }
+        magnitudes
+    }).collect();
+    let slot_fft_points: Vec<Vec<(f64, f64)>> = slot_fft_data.iter().map(|data| {
+        data.iter().enumerate().map(|(i, v)| (i as f64, *v)).collect()
+    }).collect();
+
+    // Compute unified bounds across all FFT data
+    let (x_lo, x_hi) = if !app.plot_slots.is_empty() {
+        let max_bins = slot_fft_data.iter().map(|d| d.len()).max().unwrap_or(0)
+            .max(display_data.len());
+        if app.fft_x_max > 0.0 { (app.fft_x_min, app.fft_x_max) }
+        else { (0.0, max_bins as f64) }
+    } else {
+        app.fft_x_bounds()
+    };
 
     let (y_lo, y_hi) = if app.fft_auto_limits {
-        app.auto_fft_bounds()
+        let all_fft: Vec<f64> = slot_fft_data.iter()
+            .flat_map(|d| d.iter().copied())
+            .chain(display_data.iter().copied())
+            .filter(|v| v.is_finite())
+            .collect();
+        if all_fft.is_empty() { (0.0, 1.0) }
+        else {
+            let y_min = all_fft.iter().copied().fold(f64::INFINITY, f64::min);
+            let y_max = all_fft.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+            let range = y_max - y_min;
+            let pad = if range == 0.0 { 1.0 } else { range * 0.1 };
+            (y_min - pad, y_max + pad)
+        }
     } else {
         (app.fft_y_min, app.fft_y_max)
     };
 
-    // Highlight border if this sub-plot is focused
-    let chart_border = if app.plot_focus == PlotFocus::FFT {
-        Color::Cyan
-    } else {
-        Color::DarkGray
-    };
+    let chart_border = if app.plot_focus == PlotFocus::FFT { Color::Cyan } else { Color::DarkGray };
 
     let scale_label = if app.fft_log_scale { "log" } else { "linear" };
     let hover_suffix = if app.hover_in_fft {
         if let (Some(hx), Some(hy)) = (app.hover_data_x, app.hover_data_y) {
             format!(" bin:{:.1} mag:{:.2}", hx, hy)
-        } else {
-            String::new()
-        }
-    } else {
-        String::new()
-    };
+        } else { String::new() }
+    } else { String::new() };
     let fft_title = format!(" FFT Magnitude ({}){} ", scale_label, hover_suffix);
 
     let marker = safe_marker(area);
-    let datasets = vec![Dataset::default()
-        .name(format!("{} bins", display_data.len()))
-        .marker(marker)
-        .graph_type(GraphType::Line)
-        .style(Style::default().fg(Color::Yellow))
-        .data(&fft_points)];
+    let mut datasets = Vec::new();
+
+    if app.plot_slots.is_empty() {
+        datasets.push(Dataset::default()
+            .name(format!("{} bins", display_data.len()))
+            .marker(marker)
+            .graph_type(GraphType::Line)
+            .style(Style::default().fg(Color::Yellow))
+            .data(&primary_fft_points));
+    } else {
+        for (i, slot) in app.plot_slots.iter().enumerate() {
+            if i < slot_fft_points.len() && !slot_fft_points[i].is_empty() {
+                let short_name = if slot.key_name.len() > 12 {
+                    format!("{}...", &slot.key_name[..12])
+                } else { slot.key_name.clone() };
+                datasets.push(Dataset::default()
+                    .name(short_name)
+                    .marker(marker)
+                    .graph_type(GraphType::Line)
+                    .style(Style::default().fg(slot.color))
+                    .data(&slot_fft_points[i]));
+            }
+        }
+    }
 
     let y_title = if app.fft_log_scale { "log10(Mag)" } else { "Magnitude" };
 
@@ -666,7 +710,9 @@ fn draw_fft_chart(frame: &mut Frame, app: &mut App, area: Rect, _border_color: C
                     Line::from(format!("{:.2}", (y_lo + y_hi) / 2.0)),
                     Line::from(format!("{:.2}", y_hi)),
                 ]),
-        );
+        )
+        .legend_position(Some(ratatui::widgets::LegendPosition::TopRight))
+        .hidden_legend_constraints((Constraint::Min(0), Constraint::Min(0)));
 
     frame.render_widget(chart, area);
 

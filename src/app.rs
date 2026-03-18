@@ -1630,7 +1630,7 @@ fn auto_bounds(data: &[f64]) -> (f64, f64) {
 
 /// Compute FFT magnitude spectrum using rustfft (O(N log N)).
 /// Returns magnitudes for the first N/2 frequency bins (DC to Nyquist).
-fn compute_fft_magnitude(data: &[f64]) -> Vec<f64> {
+pub fn compute_fft_magnitude(data: &[f64]) -> Vec<f64> {
     let n = data.len();
     if n == 0 {
         return Vec::new();

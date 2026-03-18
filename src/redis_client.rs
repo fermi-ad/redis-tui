@@ -426,6 +426,17 @@ impl RedisClient {
         Ok(())
     }
 
+    pub fn xtrim(&mut self, key: &str, maxlen: usize) -> Result<()> {
+        let _: i64 = redis::cmd("XTRIM")
+            .arg(key)
+            .arg("MAXLEN")
+            .arg("~")
+            .arg(maxlen)
+            .query(&mut self.connection)
+            .context("Failed to XTRIM")?;
+        Ok(())
+    }
+
     pub fn set_ttl(&mut self, key: &str, ttl: i64) -> Result<()> {
         if ttl < 0 {
             let _: () = redis::cmd("PERSIST")
