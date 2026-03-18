@@ -304,6 +304,11 @@ fn run_app(
             }
 
             if let Event::Key(key) = ev {
+                // Only handle key press events — ignore release/repeat to prevent
+                // input issues with crossterm 0.28+ terminal protocols
+                if key.kind != event::KeyEventKind::Press {
+                    continue;
+                }
                 // Stop stream listener on any navigation away
                 let prev_key = app.selected_key_name().map(|s| s.to_string());
 
