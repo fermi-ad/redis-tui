@@ -300,11 +300,6 @@ impl App {
         true
     }
 
-    /// Check if a key is currently in the plot slots
-    pub fn is_key_plotted(&self, key_name: &str) -> bool {
-        self.plot_slots.iter().any(|s| s.key_name == key_name)
-    }
-
     /// Get the color assigned to a plotted key, if any
     pub fn plot_color_for_key(&self, key_name: &str) -> Option<Color> {
         self.plot_slots.iter().find(|s| s.key_name == key_name).map(|s| s.color)
@@ -771,23 +766,6 @@ impl App {
         None
     }
 
-    pub fn start_set_plot_limits(&mut self) {
-        let (y_min, y_max) = match self.plot_focus {
-            PlotFocus::Signal => self.auto_signal_bounds(),
-            PlotFocus::FFT => self.auto_fft_bounds(),
-        };
-        let label = match self.plot_focus {
-            PlotFocus::Signal => "Signal",
-            PlotFocus::FFT => "FFT",
-        };
-        self.edit_fields = vec![
-            (format!("{} Y Min", label), format!("{:.2}", y_min)),
-            (format!("{} Y Max", label), format!("{:.2}", y_max)),
-        ];
-        self.edit_focus = 0;
-        self.input_mode = InputMode::PlotLimit;
-    }
-
     pub fn apply_plot_limits(&mut self) -> Result<(), String> {
         let y_min: f64 = self.edit_fields[0]
             .1
@@ -874,23 +852,6 @@ impl App {
             }
         }
         Ok(())
-    }
-
-    pub fn start_set_x_limits(&mut self) {
-        let (x_min, x_max) = match self.plot_focus {
-            PlotFocus::Signal => self.signal_x_bounds(),
-            PlotFocus::FFT => self.fft_x_bounds(),
-        };
-        let label = match self.plot_focus {
-            PlotFocus::Signal => "Signal",
-            PlotFocus::FFT => "FFT",
-        };
-        self.edit_fields = vec![
-            (format!("{} X Min", label), format!("{:.2}", x_min)),
-            (format!("{} X Max", label), format!("{:.2}", x_max)),
-        ];
-        self.edit_focus = 0;
-        self.input_mode = InputMode::PlotLimit;
     }
 
     pub fn apply_x_limits(&mut self) -> Result<(), String> {
@@ -1703,11 +1664,11 @@ mod tests {
     }
 
     #[test]
-    fn is_key_plotted() {
+    fn key_plotted_check_via_color() {
         let mut app = App::new();
-        assert!(!app.is_key_plotted("mykey"));
+        assert!(app.plot_color_for_key("mykey").is_none());
         app.toggle_plot_slot("mykey");
-        assert!(app.is_key_plotted("mykey"));
+        assert!(app.plot_color_for_key("mykey").is_some());
     }
 
     #[test]
