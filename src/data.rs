@@ -138,8 +138,12 @@ pub fn decode_blob(bytes: &[u8], data_type: DataType, endianness: Endianness) ->
 fn decode_chunks<const N: usize>(bytes: &[u8], f: impl Fn([u8; N]) -> f64) -> Vec<f64> {
     bytes
         .chunks_exact(N)
-        .filter_map(|chunk| <[u8; N]>::try_from(chunk).ok())
-        .map(f)
+        .map(|chunk| {
+            // chunks_exact(N) guarantees chunk.len() == N, so this is infallible
+            let mut arr = [0u8; N];
+            arr.copy_from_slice(chunk);
+            f(arr)
+        })
         .collect()
 }
 
