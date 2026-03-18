@@ -46,6 +46,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
 
 fn draw_title_bar(frame: &mut Frame, app: &App, area: Rect) {
     let url_text = app.url_display();
+    let version = env!("CARGO_PKG_VERSION");
     let title = Line::from(vec![
         Span::styled(" Redis TUI ", Style::default().fg(Color::White).bg(Color::Blue).add_modifier(Modifier::BOLD)),
         Span::raw(" "),
@@ -53,7 +54,15 @@ fn draw_title_bar(frame: &mut Frame, app: &App, area: Rect) {
         Span::raw("  "),
         Span::styled("[?]Help [q]Quit", Style::default().fg(Color::DarkGray)),
     ]);
+    let version_span = Span::styled(
+        format!("v{} ", version),
+        Style::default().fg(Color::DarkGray),
+    );
     frame.render_widget(Paragraph::new(title), area);
+    frame.render_widget(
+        Paragraph::new(Line::from(version_span)).alignment(ratatui::layout::Alignment::Right),
+        area,
+    );
 }
 
 fn draw_body(frame: &mut Frame, app: &mut App, area: Rect) {
