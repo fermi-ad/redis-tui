@@ -1413,12 +1413,6 @@ mod tests {
     use ratatui::{backend::TestBackend, Terminal};
 
     #[test]
-    fn version_matches_cargo_toml() {
-        let version = env!("CARGO_PKG_VERSION");
-        assert!(!version.is_empty(), "CARGO_PKG_VERSION should not be empty");
-    }
-
-    #[test]
     fn title_bar_contains_version() {
         let backend = TestBackend::new(80, 3);
         let mut terminal = Terminal::new(backend).unwrap();
