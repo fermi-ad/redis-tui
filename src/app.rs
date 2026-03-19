@@ -468,7 +468,9 @@ impl App {
                 }
 
                 match client.get_value(key) {
-                    Ok(value) => {
+                    Ok(mut value) => {
+                        // Cap stream entries to prevent OOM on large streams
+                        cap_stream_entries(&mut value);
                         // Track last stream ID for XREAD polling
                         if let RedisValue::Stream(ref entries) = value {
                             self.last_stream_id =
@@ -550,7 +552,8 @@ impl App {
                 }
 
                 match client.get_value(&key) {
-                    Ok(value) => {
+                    Ok(mut value) => {
+                        cap_stream_entries(&mut value);
                         if let RedisValue::Stream(ref entries) = value {
                             self.last_stream_id =
                                 entries.last().map(|e| e.id.clone());
@@ -1634,6 +1637,16 @@ fn format_stream_id(id: &str) -> String {
     let hrs = (total_secs / 3600) % 24;
 
     format!("{:02}:{:02}:{:02}.{:03}:{}", hrs, mins, secs, millis, seq)
+}
+
+/// Truncate stream entries to MAX_STREAM_ENTRIES, keeping the newest.
+fn cap_stream_entries(value: &mut RedisValue) {
+    if let RedisValue::Stream(ref mut entries) = value {
+        if entries.len() > MAX_STREAM_ENTRIES {
+            let excess = entries.len() - MAX_STREAM_ENTRIES;
+            entries.drain(..excess);
+        }
+    }
 }
 
 fn extract_stream_plot_data(
