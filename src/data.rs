@@ -447,4 +447,38 @@ mod tests {
         assert!((decoded[0] - 1.5).abs() < 1e-6);
         assert!((decoded[1] - (-3.25)).abs() < 1e-6);
     }
+
+    #[test]
+    fn roundtrip_int8_negative() {
+        let input = "-1, -4, -128";
+        let bytes = encode_values(input, DataType::Int8, Endianness::Little).unwrap();
+        let decoded = decode_blob(&bytes, DataType::Int8, Endianness::Little);
+        assert_eq!(decoded, vec![-1.0, -4.0, -128.0]);
+    }
+
+    #[test]
+    fn roundtrip_uint16_le() {
+        let input = "0, 255, 65535";
+        let bytes = encode_values(input, DataType::UInt16, Endianness::Little).unwrap();
+        let decoded = decode_blob(&bytes, DataType::UInt16, Endianness::Little);
+        assert_eq!(decoded, vec![0.0, 255.0, 65535.0]);
+    }
+
+    #[test]
+    fn encode_negative_near_zero_int8() {
+        // Values between -4 and 0 that reportedly crash
+        let input = "-1, -2, -3, -4";
+        let bytes = encode_values(input, DataType::Int8, Endianness::Little).unwrap();
+        assert_eq!(bytes, vec![0xFF, 0xFE, 0xFD, 0xFC]);
+        let decoded = decode_blob(&bytes, DataType::Int8, Endianness::Little);
+        assert_eq!(decoded, vec![-1.0, -2.0, -3.0, -4.0]);
+    }
+
+    #[test]
+    fn encode_negative_near_zero_int16() {
+        let input = "-1, -2, -3, -4";
+        let bytes = encode_values(input, DataType::Int16, Endianness::Little).unwrap();
+        let decoded = decode_blob(&bytes, DataType::Int16, Endianness::Little);
+        assert_eq!(decoded, vec![-1.0, -2.0, -3.0, -4.0]);
+    }
 }
