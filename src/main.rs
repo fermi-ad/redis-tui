@@ -480,6 +480,10 @@ fn run_app(
         app.siggen_keys = signal_generators.iter().map(|sg| sg.watching_key.clone()).collect();
 
         if !app.running {
+            // Disable mouse capture immediately so events don't queue
+            // in stdin during the blocking thread joins below.
+            let _ = io::stdout().execute(DisableMouseCapture);
+
             // Signal all threads to stop in parallel before joining
             for sg in &signal_generators {
                 sg.stop_flag.store(true, Ordering::Relaxed);
