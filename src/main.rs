@@ -527,12 +527,14 @@ fn handle_normal_input(
             app.active_panel = app.active_panel.prev();
         }
 
-        // Key list navigation
+        // Key list navigation — auto-load value so key info stays in sync
         KeyCode::Up if app.active_panel == Panel::KeyList => {
             app.select_prev_key();
+            app.load_selected_value(client);
         }
         KeyCode::Down if app.active_panel == Panel::KeyList => {
             app.select_next_key();
+            app.load_selected_value(client);
         }
         KeyCode::Enter if app.active_panel == Panel::KeyList => {
             app.load_selected_value(client);
