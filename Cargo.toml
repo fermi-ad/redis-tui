@@ -1,6 +1,6 @@
 [package]
 name = "redis-tui"
-version = "1.1.0"
+version = "1.1.2"
 edition = "2021"
 description = "A Redis TUI client inspired by Redis Insight"
 
