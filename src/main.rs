@@ -349,10 +349,13 @@ fn run_app(
                             if let Some(k) = app.selected_key_name().map(|s| s.to_string()) {
                                 let key_url = client.url_for_key(&k).to_string();
                                 if let Some(sg) = SignalGenerator::start(&key_url, &k, app.db, config) {
-                                    // Evict oldest if at capacity
+                                    // Evict oldest if at capacity (non-blocking)
                                     if signal_generators.len() >= app::MAX_PLOT_SLOTS {
                                         let mut oldest = signal_generators.remove(0);
-                                        oldest.stop();
+                                        oldest.stop_flag.store(true, Ordering::Relaxed);
+                                        if let Some(h) = oldest.handle.take() {
+                                            std::thread::spawn(move || { let _ = h.join(); });
+                                        }
                                     }
                                     signal_generators.push(sg);
                                     app.status_message = format!("Signal gen: running on '{}' ({}/{})", k, signal_generators.len(), app::MAX_PLOT_SLOTS);
@@ -390,19 +393,25 @@ fn run_app(
                             if let Some(k) = app.selected_key_name().map(|s| s.to_string()) {
                                 // Check if already listening on this key
                                 if let Some(idx) = stream_listeners.iter().position(|sl| sl.watching_key == k) {
-                                    // Stop this specific listener
+                                    // Stop this specific listener (non-blocking)
                                     let mut sl = stream_listeners.remove(idx);
-                                    sl.stop();
+                                    sl.stop_flag.store(true, Ordering::Relaxed);
+                                    if let Some(h) = sl.handle.take() {
+                                        std::thread::spawn(move || { let _ = h.join(); });
+                                    }
                                     app.status_message = format!("Stream: stopped '{}'", k);
                                 } else {
                                     // Start new listener
                                     let lid = app.last_stream_id.clone().unwrap_or_else(|| "$".to_string());
                                     let key_url = client.url_for_key(&k).to_string();
                                     if let Some(sl) = StreamListener::start(&key_url, &k, &lid, app.db) {
-                                        // Evict oldest if at capacity
+                                        // Evict oldest if at capacity (non-blocking)
                                         if stream_listeners.len() >= app::MAX_PLOT_SLOTS {
                                             let mut oldest = stream_listeners.remove(0);
-                                            oldest.stop();
+                                            oldest.stop_flag.store(true, Ordering::Relaxed);
+                                            if let Some(h) = oldest.handle.take() {
+                                                std::thread::spawn(move || { let _ = h.join(); });
+                                            }
                                         }
                                         stream_listeners.push(sl);
                                         app.status_message = format!("Stream: listening on '{}' ({}/{})", k, stream_listeners.len(), app::MAX_PLOT_SLOTS);
@@ -416,8 +425,12 @@ fn run_app(
                             if let Some(k) = app.selected_key_name().map(|s| s.to_string()) {
                                 // Check if already generating on this key
                                 if let Some(idx) = signal_generators.iter().position(|sg| sg.watching_key == k) {
+                                    // Non-blocking stop
                                     let mut sg = signal_generators.remove(idx);
-                                    sg.stop();
+                                    sg.stop_flag.store(true, Ordering::Relaxed);
+                                    if let Some(h) = sg.handle.take() {
+                                        std::thread::spawn(move || { let _ = h.join(); });
+                                    }
                                     app.status_message = format!("Signal gen: stopped '{}'", k);
                                 } else if app.is_viewing_stream() {
                                     app.start_signal_gen_popup();
@@ -437,15 +450,25 @@ fn run_app(
         // Check for completed background FFT
         app.poll_fft();
 
-        // Drain new stream entries from all background listeners
+        // Drain new stream entries from all background listeners (bounded per tick)
+        const MAX_DRAIN_PER_TICK: usize = 20;
+        let viewed_key = app.selected_key_name().map(|s| s.to_string());
         for listener in &stream_listeners {
             let mut total_new = 0;
-            while let Ok(entries) = listener.rx.try_recv() {
-                total_new += entries.len();
-                // Update the plot slot for this key
-                app.append_slot_stream_entries(&listener.watching_key, &entries);
-                // Also update main app state if this is the currently viewed key
-                app.append_stream_entries(entries);
+            let mut drained = 0;
+            while drained < MAX_DRAIN_PER_TICK {
+                match listener.rx.try_recv() {
+                    Ok(entries) => {
+                        total_new += entries.len();
+                        app.append_slot_stream_entries(&listener.watching_key, &entries);
+                        // Only update main view state if this listener matches the viewed key
+                        if viewed_key.as_deref() == Some(listener.watching_key.as_str()) {
+                            app.append_stream_entries(entries);
+                        }
+                        drained += 1;
+                    }
+                    Err(_) => break,
+                }
             }
             if total_new > 0 {
                 app.status_message = format!("Stream: +{} entries on '{}' (live)", total_new, listener.watching_key);
@@ -457,6 +480,21 @@ fn run_app(
         app.siggen_keys = signal_generators.iter().map(|sg| sg.watching_key.clone()).collect();
 
         if !app.running {
+            // Disable mouse capture immediately so events don't queue
+            // in stdin during the blocking thread joins below.
+            let _ = io::stdout().execute(DisableMouseCapture);
+
+            // Signal all threads to stop in parallel before joining
+            for sg in &signal_generators {
+                sg.stop_flag.store(true, Ordering::Relaxed);
+            }
+            for sl in &stream_listeners {
+                sl.stop_flag.store(true, Ordering::Relaxed);
+            }
+            // Join any in-flight FFT thread
+            if let Some(h) = app.fft_handle.take() {
+                let _ = h.join();
+            }
             drop(signal_generators);
             drop(stream_listeners);
             return Ok(());
