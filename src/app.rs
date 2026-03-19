@@ -1076,7 +1076,12 @@ impl App {
         match &self.current_value {
             None => vec!["(no value loaded)".to_string()],
             Some(RedisValue::String(bytes)) => {
-                if is_binary(bytes) {
+                // Show as decoded binary when data type is numeric or data looks binary
+                let show_binary = match self.data_type {
+                    DataType::String | DataType::Blob => is_binary(bytes),
+                    _ => true, // numeric data type selected — always decode
+                };
+                if show_binary {
                     let mut lines = Vec::new();
                     // Show decoded values using current data type
                     lines.push(format!("── Decoded as {} ({}) ──", self.data_type, self.endianness));
@@ -1575,7 +1580,7 @@ fn format_stream_entries(entries: &[StreamEntry], data_type: DataType, endiannes
         let time_str = format_stream_id(&entry.id);
         lines.push(format!("--- {} ({}) ---", entry.id, time_str));
         for (fname, fval) in &entry.fields {
-            if fname.starts_with('_') && is_binary(fval) {
+            if fname.starts_with('_') {
                 // Binary data field - show decoded values + hex summary
                 let decoded = decode_blob(fval, data_type, endianness);
                 if !decoded.is_empty() {
@@ -1867,5 +1872,46 @@ mod tests {
         } else {
             panic!("expected Stream value");
         }
+    }
+
+    #[test]
+    fn format_stream_entries_uint8_printable_ascii() {
+        use crate::redis_client::StreamEntry;
+        use crate::data::{DataType, Endianness};
+
+        // Create stream entry with uint8 data in printable ASCII range (65-90 = 'A'-'Z')
+        let entries = vec![StreamEntry {
+            id: "1000-0".to_string(),
+            fields: vec![
+                ("_waveform".to_string(), vec![65, 66, 67, 68, 69]),
+            ],
+        }];
+        let result = format_stream_entries(&entries, DataType::UInt8, Endianness::Little);
+        let joined = result.join("\n");
+        // Should contain decoded numeric values, not ASCII text
+        assert!(joined.contains("[uint8]"), "should show data type label, got:\n{}", joined);
+        assert!(joined.contains("65"), "should contain decoded value 65, got:\n{}", joined);
+        assert!(joined.contains("hex"), "should contain hex dump, got:\n{}", joined);
+        // Should NOT contain the ASCII interpretation 'ABCDE'
+        assert!(!joined.contains("ABCDE"), "should not show ASCII text, got:\n{}", joined);
+    }
+
+    #[test]
+    fn format_stream_entries_uint16_data() {
+        use crate::redis_client::StreamEntry;
+        use crate::data::{DataType, Endianness};
+
+        // Create uint16 LE data: 256 = [0x00, 0x01], 512 = [0x00, 0x02]
+        let entries = vec![StreamEntry {
+            id: "1000-0".to_string(),
+            fields: vec![
+                ("_data".to_string(), vec![0x00, 0x01, 0x00, 0x02]),
+            ],
+        }];
+        let result = format_stream_entries(&entries, DataType::UInt16, Endianness::Little);
+        let joined = result.join("\n");
+        assert!(joined.contains("[uint16]"), "should show uint16 label, got:\n{}", joined);
+        assert!(joined.contains("256"), "should contain decoded value 256, got:\n{}", joined);
+        assert!(joined.contains("512"), "should contain decoded value 512, got:\n{}", joined);
     }
 }
