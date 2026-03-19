@@ -8,6 +8,10 @@ use std::sync::mpsc;
 /// Maximum number of keys that can be plotted simultaneously
 pub const MAX_PLOT_SLOTS: usize = 4;
 
+/// Maximum number of stream entries kept in memory per key.
+/// Older entries are discarded when this limit is exceeded.
+pub const MAX_STREAM_ENTRIES: usize = 10_000;
+
 /// Colors assigned to each plot slot
 pub const PLOT_COLORS: [Color; MAX_PLOT_SLOTS] = [
     Color::Cyan,
@@ -500,6 +504,11 @@ impl App {
         // Append to existing stream value
         if let Some(RedisValue::Stream(ref mut entries)) = self.current_value {
             entries.extend(new_entries);
+            // Cap entries to prevent unbounded memory growth
+            if entries.len() > MAX_STREAM_ENTRIES {
+                let excess = entries.len() - MAX_STREAM_ENTRIES;
+                entries.drain(..excess);
+            }
             // Extract plot data from the last entry only (avoids cloning entire stream)
             let mut found_plot_field = false;
             if let Some(last_entry) = entries.last() {
@@ -1810,5 +1819,40 @@ mod tests {
         assert_eq!(app.plot_slots[0].data, vec![2.0]);
         assert_eq!(app.plot_slots[3].key_name, "key5");
         assert_eq!(app.plot_slots[3].data, vec![5.0]);
+    }
+
+    #[test]
+    fn append_stream_entries_caps_at_max() {
+        use crate::redis_client::StreamEntry;
+
+        let mut app = App::new();
+        // Seed current_value with an existing stream
+        let initial: Vec<StreamEntry> = (0..MAX_STREAM_ENTRIES)
+            .map(|i| StreamEntry {
+                id: format!("{}-0", i),
+                fields: vec![("data".to_string(), vec![i as u8])],
+            })
+            .collect();
+        app.current_value = Some(RedisValue::Stream(initial));
+
+        // Append 500 more entries — should trigger truncation
+        let new_entries: Vec<StreamEntry> = (0..500)
+            .map(|i| StreamEntry {
+                id: format!("{}-0", MAX_STREAM_ENTRIES + i),
+                fields: vec![("data".to_string(), vec![(i + 100) as u8])],
+            })
+            .collect();
+        let added = app.append_stream_entries(new_entries);
+        assert!(added);
+
+        if let Some(RedisValue::Stream(ref entries)) = app.current_value {
+            assert_eq!(entries.len(), MAX_STREAM_ENTRIES);
+            // Oldest entries should have been drained — first entry should be "500-0"
+            assert_eq!(entries[0].id, "500-0");
+            // Last entry should be the newest appended
+            assert_eq!(entries.last().unwrap().id, format!("{}-0", MAX_STREAM_ENTRIES + 499));
+        } else {
+            panic!("expected Stream value");
+        }
     }
 }

@@ -1413,12 +1413,6 @@ mod tests {
     use ratatui::{backend::TestBackend, Terminal};
 
     #[test]
-    fn version_matches_cargo_toml() {
-        let version = env!("CARGO_PKG_VERSION");
-        assert_eq!(version, "1.1.0");
-    }
-
-    #[test]
     fn title_bar_contains_version() {
         let backend = TestBackend::new(80, 3);
         let mut terminal = Terminal::new(backend).unwrap();
@@ -1435,10 +1429,11 @@ mod tests {
         // Collect the first row into a string
         let row: String = (0..80).map(|x| buffer.cell((x, 0)).unwrap().symbol().chars().next().unwrap_or(' ')).collect();
 
+        let version_string = format!("v{}", env!("CARGO_PKG_VERSION"));
         assert!(row.contains("Redis TUI"), "title bar should contain 'Redis TUI', got: {}", row);
-        assert!(row.contains("v1.1.0"), "title bar should contain 'v1.1.0' in top-right, got: {}", row);
+        assert!(row.contains(&version_string), "title bar should contain '{}' in top-right, got: {}", version_string, row);
         // Version should be right-aligned (near end of row)
-        let version_pos = row.find("v1.1.0").unwrap();
+        let version_pos = row.find(&version_string).unwrap();
         assert!(version_pos > 60, "version should be right-aligned, found at position {}", version_pos);
     }
 
