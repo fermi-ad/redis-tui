@@ -9,8 +9,9 @@ use std::sync::mpsc;
 pub const MAX_PLOT_SLOTS: usize = 4;
 
 /// Maximum number of stream entries kept in memory per key.
-/// Older entries are discarded when this limit is exceeded.
-pub const MAX_STREAM_ENTRIES: usize = 10_000;
+/// Only the newest entries are needed for display (last 5 shown)
+/// and plot extraction (last entry's waveform).
+pub const MAX_STREAM_ENTRIES: usize = 10;
 
 /// Colors assigned to each plot slot
 pub const PLOT_COLORS: [Color; MAX_PLOT_SLOTS] = [
