@@ -485,7 +485,7 @@ fn draw_signal_chart(frame: &mut Frame, app: &mut App, area: Rect, title: &str, 
                 } else {
                     slot.key_name.clone()
                 };
-                let legend_name = format!("{} [{:.0}..{:.0}]", short_name, sr.y_min, sr.y_max);
+                let legend_name = format!("{} {} [{:.0}..{:.0}]", short_name, slot.data_type, sr.y_min, sr.y_max);
                 datasets.push(Dataset::default()
                     .name(legend_name)
                     .marker(marker)

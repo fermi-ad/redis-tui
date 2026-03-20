@@ -626,22 +626,19 @@ fn handle_normal_input(
             app.plot_focus = app::PlotFocus::FFT;
         }
 
-        // Data plot controls
+        // Data type / endianness — updates the selected key's plot slot if plotted
         KeyCode::Char('t') if app.active_panel == Panel::DataPlot => {
             if modifiers.contains(KeyModifiers::SHIFT) {
-                app.data_type = app.data_type.prev();
+                app.cycle_data_type(false);
             } else {
-                app.data_type = app.data_type.next();
+                app.cycle_data_type(true);
             }
-            app.recompute_plot();
         }
         KeyCode::Char('T') => {
-            app.data_type = app.data_type.prev();
-            app.recompute_plot();
+            app.cycle_data_type(false);
         }
         KeyCode::Char('e') => {
-            app.endianness = app.endianness.toggle();
-            app.recompute_plot();
+            app.toggle_endianness();
         }
         KeyCode::Char('a') => {
             app.set_auto_limits();
@@ -664,10 +661,9 @@ fn handle_normal_input(
             app.status_message = format!("FFT scale: {}", state);
         }
 
-        // Global data type and endianness (work from any panel)
+        // Data type from any panel
         KeyCode::Char('t') if app.active_panel != Panel::DataPlot => {
-            app.data_type = app.data_type.next();
-            app.recompute_plot();
+            app.cycle_data_type(true);
         }
 
         // Actions

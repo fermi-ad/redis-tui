@@ -27,6 +27,8 @@ pub struct PlotSlot {
     pub key_name: String,
     pub data: Vec<f64>,
     pub color: Color,
+    pub data_type: DataType,
+    pub endianness: Endianness,
     pub y_min: Option<f64>,  // None = auto
     pub y_max: Option<f64>,  // None = auto
 }
@@ -318,6 +320,8 @@ impl App {
         self.plot_slots.push(PlotSlot {
             key_name: key_name.to_string(),
             data: Vec::new(),
+            data_type: self.data_type,
+            endianness: self.endianness,
             y_min: None,
             y_max: None,
             color,
@@ -330,15 +334,17 @@ impl App {
         self.plot_slots.iter().find(|s| s.key_name == key_name).map(|s| s.color)
     }
 
-    /// Update plot data for a specific slot by key name
+    /// Update plot data for a specific slot by key name, using the slot's own data type
     pub fn update_slot_data(&mut self, key_name: &str, value: &RedisValue) {
         if let Some(slot) = self.plot_slots.iter_mut().find(|s| s.key_name == key_name) {
+            let dt = slot.data_type;
+            let en = slot.endianness;
             slot.data = match value {
                 RedisValue::String(bytes) => {
-                    decode_blob(bytes, self.data_type, self.endianness)
+                    decode_blob(bytes, dt, en)
                 }
                 RedisValue::Stream(entries) => {
-                    extract_stream_plot_data(entries, self.data_type, self.endianness)
+                    extract_stream_plot_data(entries, dt, en)
                 }
                 RedisValue::List(items) => {
                     let mut data = Vec::new();
@@ -349,7 +355,7 @@ impl App {
                                 continue;
                             }
                         }
-                        data.extend(decode_blob(item, self.data_type, self.endianness));
+                        data.extend(decode_blob(item, dt, en));
                     }
                     data
                 }
@@ -365,7 +371,7 @@ impl App {
                                 continue;
                             }
                         }
-                        data.extend(decode_blob(val, self.data_type, self.endianness));
+                        data.extend(decode_blob(val, dt, en));
                     }
                     data
                 }
@@ -380,14 +386,16 @@ impl App {
         }
     }
 
-    /// Append stream entries to a specific plot slot
+    /// Append stream entries to a specific plot slot, using the slot's own data type
     pub fn append_slot_stream_entries(&mut self, key_name: &str, new_entries: &[StreamEntry]) {
         if let Some(slot) = self.plot_slots.iter_mut().find(|s| s.key_name == key_name) {
+            let dt = slot.data_type;
+            let en = slot.endianness;
             // Re-extract plot data from the newest entry
             if let Some(entry) = new_entries.last() {
                 for (fname, fval) in &entry.fields {
                     if fname.starts_with('_') {
-                        slot.data = decode_blob(fval, self.data_type, self.endianness);
+                        slot.data = decode_blob(fval, dt, en);
                         for v in &mut slot.data {
                             if !v.is_finite() {
                                 *v = 0.0;
@@ -638,6 +646,41 @@ impl App {
                 *v = 0.0;
             }
         }
+    }
+
+    /// Cycle the data type for the currently selected key's plot slot (if plotted),
+    /// otherwise cycle the global data type. Then recompute.
+    pub fn cycle_data_type(&mut self, forward: bool) {
+        let new_type = if forward { self.data_type.next() } else { self.data_type.prev() };
+        // Update the slot for the selected key if it's plotted
+        if let Some(key) = self.selected_key_name().map(|s| s.to_string()) {
+            if let Some(slot) = self.plot_slots.iter_mut().find(|s| s.key_name == key) {
+                slot.data_type = if forward { slot.data_type.next() } else { slot.data_type.prev() };
+                self.data_type = slot.data_type;
+            } else {
+                self.data_type = new_type;
+            }
+        } else {
+            self.data_type = new_type;
+        }
+        self.recompute_plot();
+    }
+
+    /// Toggle endianness for the currently selected key's plot slot (if plotted),
+    /// otherwise toggle the global endianness. Then recompute.
+    pub fn toggle_endianness(&mut self) {
+        let new_end = self.endianness.toggle();
+        if let Some(key) = self.selected_key_name().map(|s| s.to_string()) {
+            if let Some(slot) = self.plot_slots.iter_mut().find(|s| s.key_name == key) {
+                slot.endianness = slot.endianness.toggle();
+                self.endianness = slot.endianness;
+            } else {
+                self.endianness = new_end;
+            }
+        } else {
+            self.endianness = new_end;
+        }
+        self.recompute_plot();
     }
 
     pub fn recompute_plot(&mut self) {
