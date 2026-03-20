@@ -13,6 +13,12 @@ pub const MAX_PLOT_SLOTS: usize = 4;
 /// and plot extraction (last entry's waveform).
 pub const MAX_STREAM_ENTRIES: usize = 10;
 
+/// Maximum number of data-points kept in any single plot buffer.
+/// Prevents excessive memory consumption when plotting very large Redis values
+/// (e.g. a 100 MB binary string decoded as Int8 would otherwise produce ~100 M f64 values).
+/// Only the first MAX_PLOT_DATA_POINTS values are retained; the rest are discarded.
+pub const MAX_PLOT_DATA_POINTS: usize = 100_000;
+
 /// Colors assigned to each plot slot
 pub const PLOT_COLORS: [Color; MAX_PLOT_SLOTS] = [
     Color::Cyan,
@@ -339,7 +345,7 @@ impl App {
         if let Some(slot) = self.plot_slots.iter_mut().find(|s| s.key_name == key_name) {
             let dt = slot.data_type;
             let en = slot.endianness;
-            slot.data = match value {
+            slot.data = cap_plot_data(match value {
                 RedisValue::String(bytes) => {
                     decode_blob(bytes, dt, en)
                 }
@@ -376,7 +382,7 @@ impl App {
                     data
                 }
                 _ => Vec::new(),
-            };
+            });
             // Sanitize
             for v in &mut slot.data {
                 if !v.is_finite() {
@@ -395,7 +401,7 @@ impl App {
             if let Some(entry) = new_entries.last() {
                 for (fname, fval) in &entry.fields {
                     if fname.starts_with('_') {
-                        slot.data = decode_blob(fval, dt, en);
+                        slot.data = cap_plot_data(decode_blob(fval, dt, en));
                         for v in &mut slot.data {
                             if !v.is_finite() {
                                 *v = 0.0;
@@ -533,7 +539,7 @@ impl App {
             if let Some(last_entry) = entries.last() {
                 for (fname, fval) in &last_entry.fields {
                     if fname.starts_with('_') {
-                        self.plot_data = decode_blob(fval, self.data_type, self.endianness);
+                        self.plot_data = cap_plot_data(decode_blob(fval, self.data_type, self.endianness));
                         for v in &mut self.plot_data {
                             if !v.is_finite() {
                                 *v = 0.0;
@@ -595,7 +601,7 @@ impl App {
     }
 
     fn update_plot_data(&mut self, value: &RedisValue) {
-        self.plot_data = match value {
+        self.plot_data = cap_plot_data(match value {
             RedisValue::String(bytes) => {
                 decode_blob(bytes, self.data_type, self.endianness)
             }
@@ -639,7 +645,7 @@ impl App {
                 data
             }
             _ => Vec::new(),
-        };
+        });
         // Sanitize: replace NaN/Infinity with 0.0 to prevent chart panics
         for v in &mut self.plot_data {
             if !v.is_finite() {
@@ -1664,6 +1670,13 @@ fn format_stream_id(id: &str) -> String {
     format!("{:02}:{:02}:{:02}.{:03}:{}", hrs, mins, secs, millis, seq)
 }
 
+/// Truncate a plot data buffer to at most MAX_PLOT_DATA_POINTS entries,
+/// keeping the first points and dropping the rest.
+fn cap_plot_data(mut data: Vec<f64>) -> Vec<f64> {
+    data.truncate(MAX_PLOT_DATA_POINTS);
+    data
+}
+
 /// Truncate stream entries to MAX_STREAM_ENTRIES, keeping the newest.
 fn cap_stream_entries(value: &mut RedisValue) {
     if let RedisValue::Stream(ref mut entries) = value {
@@ -1933,5 +1946,113 @@ mod tests {
         assert!(joined.contains("[uint16]"), "should show uint16 label, got:\n{}", joined);
         assert!(joined.contains("256"), "should contain decoded value 256, got:\n{}", joined);
         assert!(joined.contains("512"), "should contain decoded value 512, got:\n{}", joined);
+    }
+
+    // ── cap_plot_data tests ────────────────────────────────────────────────────
+
+    #[test]
+    fn cap_plot_data_under_limit_unchanged() {
+        let data: Vec<f64> = (0..100).map(|i| i as f64).collect();
+        let capped = cap_plot_data(data.clone());
+        assert_eq!(capped, data);
+    }
+
+    #[test]
+    fn cap_plot_data_over_limit_truncated() {
+        let data: Vec<f64> = (0..(MAX_PLOT_DATA_POINTS + 500)).map(|i| i as f64).collect();
+        let capped = cap_plot_data(data);
+        assert_eq!(capped.len(), MAX_PLOT_DATA_POINTS);
+        // First MAX_PLOT_DATA_POINTS values should be kept
+        assert_eq!(capped[0], 0.0);
+        assert_eq!(capped[MAX_PLOT_DATA_POINTS - 1], (MAX_PLOT_DATA_POINTS - 1) as f64);
+    }
+
+    #[test]
+    fn update_plot_data_string_capped() {
+        let mut app = App::new();
+        // Int8: each byte maps to one f64, so MAX+1 bytes → MAX points
+        let bytes: Vec<u8> = vec![1u8; MAX_PLOT_DATA_POINTS + 1];
+        app.update_plot_data(&RedisValue::String(bytes));
+        assert_eq!(app.plot_data.len(), MAX_PLOT_DATA_POINTS);
+    }
+
+    #[test]
+    fn update_plot_data_list_capped() {
+        let mut app = App::new();
+        // Build a list with more than MAX_PLOT_DATA_POINTS numeric items
+        let items: Vec<Vec<u8>> = (0..(MAX_PLOT_DATA_POINTS + 10))
+            .map(|i| format!("{}", i).into_bytes())
+            .collect();
+        app.update_plot_data(&RedisValue::List(items));
+        assert_eq!(app.plot_data.len(), MAX_PLOT_DATA_POINTS);
+    }
+
+    #[test]
+    fn update_plot_data_zset_capped() {
+        let mut app = App::new();
+        let pairs: Vec<(Vec<u8>, f64)> = (0..(MAX_PLOT_DATA_POINTS + 10))
+            .map(|i| (format!("m{}", i).into_bytes(), i as f64))
+            .collect();
+        app.update_plot_data(&RedisValue::ZSet(pairs));
+        assert_eq!(app.plot_data.len(), MAX_PLOT_DATA_POINTS);
+    }
+
+    #[test]
+    fn update_plot_data_hash_capped() {
+        let mut app = App::new();
+        let pairs: Vec<(String, Vec<u8>)> = (0..(MAX_PLOT_DATA_POINTS + 10))
+            .map(|i| (format!("k{}", i), format!("{}", i).into_bytes()))
+            .collect();
+        app.update_plot_data(&RedisValue::Hash(pairs));
+        assert_eq!(app.plot_data.len(), MAX_PLOT_DATA_POINTS);
+    }
+
+    #[test]
+    fn update_slot_data_capped() {
+        let mut app = App::new();
+        app.toggle_plot_slot("bigkey");
+        let bytes: Vec<u8> = vec![1u8; MAX_PLOT_DATA_POINTS + 1];
+        let value = RedisValue::String(bytes);
+        app.update_slot_data("bigkey", &value);
+        assert_eq!(app.plot_slots[0].data.len(), MAX_PLOT_DATA_POINTS);
+    }
+
+    #[test]
+    fn append_stream_entries_plot_data_capped() {
+        use crate::redis_client::StreamEntry;
+
+        let mut app = App::new();
+        // Seed current_value with an initial stream entry
+        let initial = vec![StreamEntry {
+            id: "0-0".to_string(),
+            fields: vec![("_wave".to_string(), vec![0u8])],
+        }];
+        app.current_value = Some(RedisValue::Stream(initial));
+
+        // New entry whose '_wave' field decodes to MAX+1 points (Int8, one byte per point)
+        let large_payload: Vec<u8> = vec![1u8; MAX_PLOT_DATA_POINTS + 1];
+        let new_entries = vec![StreamEntry {
+            id: "1-0".to_string(),
+            fields: vec![("_wave".to_string(), large_payload)],
+        }];
+        let added = app.append_stream_entries(new_entries);
+        assert!(added);
+        assert_eq!(app.plot_data.len(), MAX_PLOT_DATA_POINTS);
+    }
+
+    #[test]
+    fn append_slot_stream_entries_data_capped() {
+        use crate::redis_client::StreamEntry;
+
+        let mut app = App::new();
+        app.toggle_plot_slot("wavekey");
+
+        let large_payload: Vec<u8> = vec![42u8; MAX_PLOT_DATA_POINTS + 1];
+        let new_entries = vec![StreamEntry {
+            id: "1-0".to_string(),
+            fields: vec![("_wave".to_string(), large_payload)],
+        }];
+        app.append_slot_stream_entries("wavekey", &new_entries);
+        assert_eq!(app.plot_slots[0].data.len(), MAX_PLOT_DATA_POINTS);
     }
 }
