@@ -312,28 +312,35 @@ fn run_app(
         if event::poll(Duration::from_millis(50))? {
             let ev = event::read()?;
 
-            // Handle mouse events
-            // Shift disables mouse capture so the terminal handles native selection.
-            // Shift+drag = line select, Shift+Alt+drag = block/rectangular select.
+            // Handle mouse events (shift bypass: let terminal handle native selection)
+            // Shift+drag = line select, Shift+Alt+drag = block/rectangular select
             if let Event::Mouse(mouse) = ev {
-                if mouse.modifiers.contains(KeyModifiers::SHIFT) && !shift_selecting {
-                    // Entering selection mode: disable mouse capture so
-                    // the terminal handles selection natively
-                    let _ = io::stdout().execute(DisableMouseCapture);
-                    shift_selecting = true;
-                } else if !shift_selecting {
+                if shift_selecting {
+                    // While selection is active, consume all mouse events to
+                    // prevent redraws. Only a plain click (no modifiers) clears it.
+                    if !mouse.modifiers.contains(KeyModifiers::SHIFT)
+                        && matches!(mouse.kind, MouseEventKind::Down(_))
+                    {
+                        shift_selecting = false;
+                        handle_mouse_event(&mut app, mouse);
+                    }
+                    // Otherwise: swallow the event entirely (don't let terminal see it)
+                } else if mouse.modifiers.contains(KeyModifiers::SHIFT) {
+                    // Starting a new selection — only activate on drag/down
+                    if matches!(mouse.kind, MouseEventKind::Down(_) | MouseEventKind::Drag(_)) {
+                        shift_selecting = true;
+                    }
+                } else {
                     handle_mouse_event(&mut app, mouse);
                 }
             }
 
-            // Re-enable mouse capture when a non-modifier key is pressed
+            // A non-modifier key press clears selection (user is done copying)
             if let Event::Key(key) = ev {
-                if shift_selecting
-                    && key.kind == event::KeyEventKind::Press
+                if key.kind == event::KeyEventKind::Press
                     && !matches!(key.code, KeyCode::Modifier(_))
                 {
                     shift_selecting = false;
-                    let _ = io::stdout().execute(EnableMouseCapture);
                 }
             }
 
