@@ -312,10 +312,13 @@ fn run_app(
         if event::poll(Duration::from_millis(50))? {
             let ev = event::read()?;
 
-            // Handle mouse events (shift-bypass: let terminal handle native selection)
+            // Handle mouse events (shift/alt bypass: let terminal handle native selection)
             if let Event::Mouse(mouse) = ev {
-                if mouse.modifiers.contains(KeyModifiers::SHIFT) {
+                let selecting_modifier = mouse.modifiers.contains(KeyModifiers::SHIFT)
+                    || mouse.modifiers.contains(KeyModifiers::ALT);
+                if selecting_modifier {
                     // Suppress redraws so native text selection persists
+                    // Shift = line select, Alt = block/rectangular select
                     shift_selecting = true;
                 } else if shift_selecting {
                     // While selection is active, ignore all mouse events to
@@ -329,11 +332,10 @@ fn run_app(
                 }
             }
 
-            // A non-shift key press clears shift-selection (user is done copying)
+            // A non-modifier key press clears selection (user is done copying)
             if let Event::Key(key) = ev {
                 if key.kind == event::KeyEventKind::Press
-                    && key.code != KeyCode::Modifier(event::ModifierKeyCode::LeftShift)
-                    && key.code != KeyCode::Modifier(event::ModifierKeyCode::RightShift)
+                    && !matches!(key.code, KeyCode::Modifier(_))
                 {
                     shift_selecting = false;
                 }
