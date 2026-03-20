@@ -300,8 +300,13 @@ fn run_app(
     let mut stream_listeners: Vec<StreamListener> = Vec::new();
     let mut signal_generators: Vec<SignalGenerator> = Vec::new();
 
+    let mut shift_selecting = false;
+
     loop {
-        terminal.draw(|frame| ui::draw(frame, &mut app))?;
+        // Skip redraws while shift-selecting to preserve native text selection
+        if !shift_selecting {
+            terminal.draw(|frame| ui::draw(frame, &mut app))?;
+        }
 
         // Poll for events with short timeout
         if event::poll(Duration::from_millis(50))? {
@@ -309,7 +314,15 @@ fn run_app(
 
             // Handle mouse events (shift-bypass: let terminal handle native selection)
             if let Event::Mouse(mouse) = ev {
-                if !mouse.modifiers.contains(KeyModifiers::SHIFT) {
+                if mouse.modifiers.contains(KeyModifiers::SHIFT) {
+                    // Track shift-select state to suppress redraws
+                    match mouse.kind {
+                        MouseEventKind::Down(_) => shift_selecting = true,
+                        MouseEventKind::Up(_) => shift_selecting = false,
+                        _ => {}
+                    }
+                } else {
+                    shift_selecting = false;
                     handle_mouse_event(&mut app, mouse);
                 }
             }
@@ -1104,6 +1117,22 @@ fn handle_mouse_event(app: &mut App, mouse: MouseEvent) {
             app.mouse_dragging = false;
         }
         MouseEventKind::ScrollUp => {
+            // Scroll key list if mouse is over it
+            if let Some((kx, ky, kw, kh)) = app.key_list_area {
+                if col >= kx && col < kx + kw && row >= ky && row < ky + kh {
+                    app.select_prev_key();
+                    app.pending_click_load = true;
+                    return;
+                }
+            }
+            // Scroll value view if mouse is over it
+            if let Some((vx, vy, vw, vh)) = app.value_view_area {
+                if col >= vx && col < vx + vw && row >= vy && row < vy + vh {
+                    app.scroll_value_up();
+                    return;
+                }
+            }
+            // Zoom plot if mouse is over chart area
             if let Some((cx, cy, cw, ch)) = if app.hover_in_fft {
                 app.fft_chart_area
             } else {
@@ -1115,6 +1144,22 @@ fn handle_mouse_event(app: &mut App, mouse: MouseEvent) {
             }
         }
         MouseEventKind::ScrollDown => {
+            // Scroll key list if mouse is over it
+            if let Some((kx, ky, kw, kh)) = app.key_list_area {
+                if col >= kx && col < kx + kw && row >= ky && row < ky + kh {
+                    app.select_next_key();
+                    app.pending_click_load = true;
+                    return;
+                }
+            }
+            // Scroll value view if mouse is over it
+            if let Some((vx, vy, vw, vh)) = app.value_view_area {
+                if col >= vx && col < vx + vw && row >= vy && row < vy + vh {
+                    app.scroll_value_down();
+                    return;
+                }
+            }
+            // Zoom plot if mouse is over chart area
             if let Some((cx, cy, cw, ch)) = if app.hover_in_fft {
                 app.fft_chart_area
             } else {

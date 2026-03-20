@@ -162,6 +162,7 @@ pub struct App {
 
     // Panel area rects (set during draw)
     pub key_list_area: Option<(u16, u16, u16, u16)>,     // x, y, w, h
+    pub value_view_area: Option<(u16, u16, u16, u16)>,   // x, y, w, h
     pub signal_chart_area: Option<(u16, u16, u16, u16)>, // x, y, w, h (inner)
     pub fft_chart_area: Option<(u16, u16, u16, u16)>,
 
@@ -262,6 +263,7 @@ impl App {
             hover_in_fft: false,
 
             key_list_area: None,
+            value_view_area: None,
             signal_chart_area: None,
             fft_chart_area: None,
             pending_click_load: false,

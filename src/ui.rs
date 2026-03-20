@@ -196,7 +196,8 @@ fn draw_key_list(frame: &mut Frame, app: &mut App, area: Rect) {
     frame.render_stateful_widget(list, area, &mut app.key_list_state);
 }
 
-fn draw_value_view(frame: &mut Frame, app: &App, area: Rect) {
+fn draw_value_view(frame: &mut Frame, app: &mut App, area: Rect) {
+    app.value_view_area = Some((area.x, area.y, area.width, area.height));
     let border_color = if app.active_panel == Panel::ValueView {
         BORDER_ACTIVE
     } else {
