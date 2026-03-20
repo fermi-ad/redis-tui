@@ -160,9 +160,13 @@ pub struct App {
     pub hover_data_y: Option<f64>,
     pub hover_in_fft: bool,   // true if hovering in FFT chart
 
-    // Chart area rects (set during draw)
+    // Panel area rects (set during draw)
+    pub key_list_area: Option<(u16, u16, u16, u16)>,     // x, y, w, h
     pub signal_chart_area: Option<(u16, u16, u16, u16)>, // x, y, w, h (inner)
     pub fft_chart_area: Option<(u16, u16, u16, u16)>,
+
+    // Pending actions from mouse clicks (processed in main loop with client access)
+    pub pending_click_load: bool,
 
     // Connection
     pub db: i64,
@@ -257,8 +261,10 @@ impl App {
             hover_data_y: None,
             hover_in_fft: false,
 
+            key_list_area: None,
             signal_chart_area: None,
             fft_chart_area: None,
+            pending_click_load: false,
 
             db: 0,
             db_size: 0,

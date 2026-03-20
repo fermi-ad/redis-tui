@@ -113,6 +113,7 @@ fn draw_body(frame: &mut Frame, app: &mut App, area: Rect) {
 }
 
 fn draw_key_list(frame: &mut Frame, app: &mut App, area: Rect) {
+    app.key_list_area = Some((area.x, area.y, area.width, area.height));
     let border_color = if app.active_panel == Panel::KeyList {
         BORDER_ACTIVE
     } else {

@@ -7,7 +7,7 @@ use anyhow::{Context, Result};
 use app::{App, InputMode, Panel};
 use clap::Parser;
 use crossterm::{
-    event::{self, Event, KeyCode, KeyModifiers, MouseEvent, MouseEventKind, EnableMouseCapture, DisableMouseCapture},
+    event::{self, Event, KeyCode, KeyModifiers, MouseEvent, MouseEventKind, EnableMouseCapture, DisableMouseCapture, EnableBracketedPaste, DisableBracketedPaste},
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
     ExecutableCommand,
 };
@@ -120,6 +120,7 @@ fn main() -> Result<()> {
     std::panic::set_hook(Box::new(move |info| {
         if std::thread::current().id() == main_thread_id {
             let _ = disable_raw_mode();
+            let _ = io::stdout().execute(DisableBracketedPaste);
             let _ = io::stdout().execute(DisableMouseCapture);
             let _ = io::stdout().execute(LeaveAlternateScreen);
         }
@@ -134,6 +135,9 @@ fn main() -> Result<()> {
     io::stdout()
         .execute(EnableMouseCapture)
         .context("Failed to enable mouse capture")?;
+    io::stdout()
+        .execute(EnableBracketedPaste)
+        .context("Failed to enable bracketed paste")?;
     let backend = CrosstermBackend::new(io::stdout());
     let mut terminal = Terminal::new(backend).context("Failed to create terminal")?;
 
@@ -142,6 +146,9 @@ fn main() -> Result<()> {
 
     // Restore terminal
     disable_raw_mode().context("Failed to disable raw mode")?;
+    io::stdout()
+        .execute(DisableBracketedPaste)
+        .context("Failed to disable bracketed paste")?;
     io::stdout()
         .execute(DisableMouseCapture)
         .context("Failed to disable mouse capture")?;
@@ -300,9 +307,42 @@ fn run_app(
         if event::poll(Duration::from_millis(50))? {
             let ev = event::read()?;
 
-            // Handle mouse events
+            // Handle mouse events (shift-bypass: let terminal handle native selection)
             if let Event::Mouse(mouse) = ev {
-                handle_mouse_event(&mut app, mouse);
+                if !mouse.modifiers.contains(KeyModifiers::SHIFT) {
+                    handle_mouse_event(&mut app, mouse);
+                }
+            }
+
+            // Handle paste events (bracketed paste from terminal)
+            if let Event::Paste(data) = &ev {
+                match app.input_mode {
+                    InputMode::Filter => app.filter_text.push_str(data),
+                    InputMode::Edit => {
+                        if let Some((_label, value)) = app.edit_fields.get_mut(app.edit_focus) {
+                            value.push_str(data);
+                        }
+                    }
+                    InputMode::PlotLimit => {
+                        if let Some((_label, value)) = app.edit_fields.get_mut(app.edit_focus) {
+                            value.push_str(data);
+                        }
+                    }
+                    InputMode::SignalGen => {
+                        if let Some(idx) = app.signal_gen_focus.checked_sub(2) {
+                            if let Some((_label, value)) = app.signal_gen_fields.get_mut(idx) {
+                                value.push_str(data);
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+
+            // Load value after click-to-select (needs client access)
+            if app.pending_click_load {
+                app.pending_click_load = false;
+                app.load_selected_value(client);
             }
 
             if let Event::Key(key) = ev {
@@ -1018,6 +1058,19 @@ fn handle_mouse_event(app: &mut App, mouse: MouseEvent) {
             }
         }
         MouseEventKind::Down(crossterm::event::MouseButton::Left) => {
+            // Click-to-select in key list
+            if let Some((kx, ky, kw, kh)) = app.key_list_area {
+                if col >= kx && col < kx + kw && row > ky && row < ky + kh.saturating_sub(1) {
+                    let visible_idx = (row - ky - 1) as usize;
+                    let actual_idx = visible_idx + app.key_list_state.offset();
+                    if actual_idx < app.keys.len() {
+                        app.key_list_state.select(Some(actual_idx));
+                        app.active_panel = Panel::KeyList;
+                        app.pending_click_load = true;
+                    }
+                    return;
+                }
+            }
             if app.mouse_to_data(col, row).is_some() {
                 app.mouse_dragging = true;
                 app.drag_start_x = col;
