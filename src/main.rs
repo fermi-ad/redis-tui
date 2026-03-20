@@ -329,9 +329,14 @@ fn run_app(
                 }
             }
 
-            // Any keypress clears shift-selection (user is done copying)
-            if let Event::Key(_) = ev {
-                shift_selecting = false;
+            // A non-shift key press clears shift-selection (user is done copying)
+            if let Event::Key(key) = ev {
+                if key.kind == event::KeyEventKind::Press
+                    && key.code != KeyCode::Modifier(event::ModifierKeyCode::LeftShift)
+                    && key.code != KeyCode::Modifier(event::ModifierKeyCode::RightShift)
+                {
+                    shift_selecting = false;
+                }
             }
 
             // Handle paste events (bracketed paste from terminal)
