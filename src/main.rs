@@ -7,7 +7,7 @@ use anyhow::{Context, Result};
 use app::{App, InputMode, Panel};
 use clap::Parser;
 use crossterm::{
-    event::{self, Event, KeyCode, KeyModifiers, MouseEvent, MouseEventKind, EnableMouseCapture, DisableMouseCapture},
+    event::{self, Event, KeyCode, KeyModifiers, MouseEvent, MouseEventKind, EnableMouseCapture, DisableMouseCapture, EnableBracketedPaste, DisableBracketedPaste},
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
     ExecutableCommand,
 };
@@ -120,6 +120,7 @@ fn main() -> Result<()> {
     std::panic::set_hook(Box::new(move |info| {
         if std::thread::current().id() == main_thread_id {
             let _ = disable_raw_mode();
+            let _ = io::stdout().execute(DisableBracketedPaste);
             let _ = io::stdout().execute(DisableMouseCapture);
             let _ = io::stdout().execute(LeaveAlternateScreen);
         }
@@ -134,6 +135,9 @@ fn main() -> Result<()> {
     io::stdout()
         .execute(EnableMouseCapture)
         .context("Failed to enable mouse capture")?;
+    io::stdout()
+        .execute(EnableBracketedPaste)
+        .context("Failed to enable bracketed paste")?;
     let backend = CrosstermBackend::new(io::stdout());
     let mut terminal = Terminal::new(backend).context("Failed to create terminal")?;
 
@@ -142,6 +146,9 @@ fn main() -> Result<()> {
 
     // Restore terminal
     disable_raw_mode().context("Failed to disable raw mode")?;
+    io::stdout()
+        .execute(DisableBracketedPaste)
+        .context("Failed to disable bracketed paste")?;
     io::stdout()
         .execute(DisableMouseCapture)
         .context("Failed to disable mouse capture")?;
@@ -293,16 +300,79 @@ fn run_app(
     let mut stream_listeners: Vec<StreamListener> = Vec::new();
     let mut signal_generators: Vec<SignalGenerator> = Vec::new();
 
+    let mut shift_selecting = false;
+
     loop {
-        terminal.draw(|frame| ui::draw(frame, &mut app))?;
+        // Skip redraws while shift-selecting to preserve native text selection
+        if !shift_selecting {
+            terminal.draw(|frame| ui::draw(frame, &mut app))?;
+        }
 
         // Poll for events with short timeout
         if event::poll(Duration::from_millis(50))? {
             let ev = event::read()?;
 
-            // Handle mouse events
+            // Handle mouse events (shift bypass: let terminal handle native selection)
+            // Shift+drag = line select, Shift+Alt+drag = block/rectangular select
             if let Event::Mouse(mouse) = ev {
-                handle_mouse_event(&mut app, mouse);
+                if shift_selecting {
+                    // While selection is active, consume all mouse events to
+                    // prevent redraws. Only a plain click (no modifiers) clears it.
+                    if !mouse.modifiers.contains(KeyModifiers::SHIFT)
+                        && matches!(mouse.kind, MouseEventKind::Down(_))
+                    {
+                        shift_selecting = false;
+                        handle_mouse_event(&mut app, mouse);
+                    }
+                    // Otherwise: swallow the event entirely (don't let terminal see it)
+                } else if mouse.modifiers.contains(KeyModifiers::SHIFT) {
+                    // Starting a new selection — only activate on drag/down
+                    if matches!(mouse.kind, MouseEventKind::Down(_) | MouseEventKind::Drag(_)) {
+                        shift_selecting = true;
+                    }
+                } else {
+                    handle_mouse_event(&mut app, mouse);
+                }
+            }
+
+            // A non-modifier key press clears selection (user is done copying)
+            if let Event::Key(key) = ev {
+                if key.kind == event::KeyEventKind::Press
+                    && !matches!(key.code, KeyCode::Modifier(_))
+                {
+                    shift_selecting = false;
+                }
+            }
+
+            // Handle paste events (bracketed paste from terminal)
+            if let Event::Paste(data) = &ev {
+                match app.input_mode {
+                    InputMode::Filter => app.filter_text.push_str(data),
+                    InputMode::Edit => {
+                        if let Some((_label, value)) = app.edit_fields.get_mut(app.edit_focus) {
+                            value.push_str(data);
+                        }
+                    }
+                    InputMode::PlotLimit => {
+                        if let Some((_label, value)) = app.edit_fields.get_mut(app.edit_focus) {
+                            value.push_str(data);
+                        }
+                    }
+                    InputMode::SignalGen => {
+                        if let Some(idx) = app.signal_gen_focus.checked_sub(2) {
+                            if let Some((_label, value)) = app.signal_gen_fields.get_mut(idx) {
+                                value.push_str(data);
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+
+            // Load value after click-to-select (needs client access)
+            if app.pending_click_load {
+                app.pending_click_load = false;
+                app.load_selected_value(client);
             }
 
             if let Event::Key(key) = ev {
@@ -556,22 +626,19 @@ fn handle_normal_input(
             app.plot_focus = app::PlotFocus::FFT;
         }
 
-        // Data plot controls
+        // Data type / endianness — updates the selected key's plot slot if plotted
         KeyCode::Char('t') if app.active_panel == Panel::DataPlot => {
             if modifiers.contains(KeyModifiers::SHIFT) {
-                app.data_type = app.data_type.prev();
+                app.cycle_data_type(false);
             } else {
-                app.data_type = app.data_type.next();
+                app.cycle_data_type(true);
             }
-            app.recompute_plot();
         }
         KeyCode::Char('T') => {
-            app.data_type = app.data_type.prev();
-            app.recompute_plot();
+            app.cycle_data_type(false);
         }
         KeyCode::Char('e') => {
-            app.endianness = app.endianness.toggle();
-            app.recompute_plot();
+            app.toggle_endianness();
         }
         KeyCode::Char('a') => {
             app.set_auto_limits();
@@ -594,10 +661,9 @@ fn handle_normal_input(
             app.status_message = format!("FFT scale: {}", state);
         }
 
-        // Global data type and endianness (work from any panel)
+        // Data type from any panel
         KeyCode::Char('t') if app.active_panel != Panel::DataPlot => {
-            app.data_type = app.data_type.next();
-            app.recompute_plot();
+            app.cycle_data_type(true);
         }
 
         // Actions
@@ -929,19 +995,7 @@ fn handle_plot_limit_input(app: &mut App, code: KeyCode) {
             }
         }
         KeyCode::Enter => {
-            // Detect if this is the combined 4-field settings popup or a legacy 2-field one
-            let result = if app.edit_fields.len() == 4 {
-                app.apply_plot_settings()
-            } else {
-                let is_x_limit = app.edit_fields.first()
-                    .map(|(label, _)| label.contains("X Min"))
-                    .unwrap_or(false);
-                if is_x_limit {
-                    app.apply_x_limits()
-                } else {
-                    app.apply_plot_limits()
-                }
-            };
+            let result = app.apply_plot_settings();
             match result {
                 Ok(_) => {
                     app.status_message = "Plot settings applied".to_string();
@@ -1018,6 +1072,19 @@ fn handle_mouse_event(app: &mut App, mouse: MouseEvent) {
             }
         }
         MouseEventKind::Down(crossterm::event::MouseButton::Left) => {
+            // Click-to-select in key list
+            if let Some((kx, ky, kw, kh)) = app.key_list_area {
+                if col >= kx && col < kx + kw && row > ky && row < ky + kh.saturating_sub(1) {
+                    let visible_idx = (row - ky - 1) as usize;
+                    let actual_idx = visible_idx + app.key_list_state.offset();
+                    if actual_idx < app.keys.len() {
+                        app.key_list_state.select(Some(actual_idx));
+                        app.active_panel = Panel::KeyList;
+                        app.pending_click_load = true;
+                    }
+                    return;
+                }
+            }
             if app.mouse_to_data(col, row).is_some() {
                 app.mouse_dragging = true;
                 app.drag_start_x = col;
@@ -1051,6 +1118,22 @@ fn handle_mouse_event(app: &mut App, mouse: MouseEvent) {
             app.mouse_dragging = false;
         }
         MouseEventKind::ScrollUp => {
+            // Scroll key list viewport (without changing selection)
+            if let Some((kx, ky, kw, kh)) = app.key_list_area {
+                if col >= kx && col < kx + kw && row >= ky && row < ky + kh {
+                    let offset = app.key_list_state.offset_mut();
+                    *offset = offset.saturating_sub(1);
+                    return;
+                }
+            }
+            // Scroll value view
+            if let Some((vx, vy, vw, vh)) = app.value_view_area {
+                if col >= vx && col < vx + vw && row >= vy && row < vy + vh {
+                    app.scroll_value_up();
+                    return;
+                }
+            }
+            // Zoom plot if mouse is over chart area
             if let Some((cx, cy, cw, ch)) = if app.hover_in_fft {
                 app.fft_chart_area
             } else {
@@ -1062,6 +1145,25 @@ fn handle_mouse_event(app: &mut App, mouse: MouseEvent) {
             }
         }
         MouseEventKind::ScrollDown => {
+            // Scroll key list viewport (without changing selection)
+            if let Some((kx, ky, kw, kh)) = app.key_list_area {
+                if col >= kx && col < kx + kw && row >= ky && row < ky + kh {
+                    let max_offset = app.keys.len().saturating_sub(1);
+                    let offset = app.key_list_state.offset_mut();
+                    if *offset < max_offset {
+                        *offset += 1;
+                    }
+                    return;
+                }
+            }
+            // Scroll value view
+            if let Some((vx, vy, vw, vh)) = app.value_view_area {
+                if col >= vx && col < vx + vw && row >= vy && row < vy + vh {
+                    app.scroll_value_down();
+                    return;
+                }
+            }
+            // Zoom plot if mouse is over chart area
             if let Some((cx, cy, cw, ch)) = if app.hover_in_fft {
                 app.fft_chart_area
             } else {

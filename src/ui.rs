@@ -113,6 +113,7 @@ fn draw_body(frame: &mut Frame, app: &mut App, area: Rect) {
 }
 
 fn draw_key_list(frame: &mut Frame, app: &mut App, area: Rect) {
+    app.key_list_area = Some((area.x, area.y, area.width, area.height));
     let border_color = if app.active_panel == Panel::KeyList {
         BORDER_ACTIVE
     } else {
@@ -195,7 +196,8 @@ fn draw_key_list(frame: &mut Frame, app: &mut App, area: Rect) {
     frame.render_stateful_widget(list, area, &mut app.key_list_state);
 }
 
-fn draw_value_view(frame: &mut Frame, app: &App, area: Rect) {
+fn draw_value_view(frame: &mut Frame, app: &mut App, area: Rect) {
+    app.value_view_area = Some((area.x, area.y, area.width, area.height));
     let border_color = if app.active_panel == Panel::ValueView {
         BORDER_ACTIVE
     } else {
@@ -421,18 +423,24 @@ fn draw_signal_chart(frame: &mut Frame, app: &mut App, area: Rect, title: &str, 
     let (y_lo, y_hi) = if app.plot_slots.len() > 1 {
         // Multi-key: always normalized 0-1, per-key Y scales rendered separately
         (-0.05, 1.05)
-    } else if !app.plot_slots.is_empty() && app.plot_auto_limits {
-        // Single slot, auto: use its actual bounds
-        let all_data: Vec<f64> = app.plot_slots[0].data.iter().copied()
-            .filter(|v| v.is_finite()).collect();
-        if all_data.is_empty() {
-            (0.0, 1.0)
+    } else if !app.plot_slots.is_empty() {
+        let slot = &app.plot_slots[0];
+        if slot.y_min.is_some() && slot.y_max.is_some() {
+            // Manual per-slot limits
+            (slot.y_min.unwrap(), slot.y_max.unwrap())
         } else {
-            let y_min = all_data.iter().copied().fold(f64::INFINITY, f64::min);
-            let y_max = all_data.iter().copied().fold(f64::NEG_INFINITY, f64::max);
-            let range = y_max - y_min;
-            let pad = if range == 0.0 { 1.0 } else { range * 0.1 };
-            (y_min - pad, y_max + pad)
+            // Auto: use actual data bounds
+            let all_data: Vec<f64> = slot.data.iter().copied()
+                .filter(|v| v.is_finite()).collect();
+            if all_data.is_empty() {
+                (0.0, 1.0)
+            } else {
+                let y_min = all_data.iter().copied().fold(f64::INFINITY, f64::min);
+                let y_max = all_data.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+                let range = y_max - y_min;
+                let pad = if range == 0.0 { 1.0 } else { range * 0.1 };
+                (y_min - pad, y_max + pad)
+            }
         }
     } else if app.plot_auto_limits {
         app.auto_signal_bounds()
@@ -449,10 +457,28 @@ fn draw_signal_chart(frame: &mut Frame, app: &mut App, area: Rect, title: &str, 
         border_color
     };
 
-    // Build title with hover coords
+    // Build title with hover coords — show Y value for each plotted key
     let hover_suffix = if !app.hover_in_fft {
-        if let (Some(hx), Some(hy)) = (app.hover_data_x, app.hover_data_y) {
-            format!(" x:{:.1} y:{:.2}", hx, hy)
+        if let Some(hx) = app.hover_data_x {
+            let x_idx = hx.round() as usize;
+            if !app.plot_slots.is_empty() {
+                let mut parts = vec![format!(" x:{:.0}", hx)];
+                for slot in &app.plot_slots {
+                    if let Some(&val) = slot.data.get(x_idx) {
+                        let short = if slot.key_name.len() > 8 {
+                            format!("{}...", &slot.key_name[..8])
+                        } else {
+                            slot.key_name.clone()
+                        };
+                        parts.push(format!("{}:{:.2}", short, val));
+                    }
+                }
+                parts.join(" ")
+            } else if let Some(hy) = app.hover_data_y {
+                format!(" x:{:.1} y:{:.2}", hx, hy)
+            } else {
+                String::new()
+            }
         } else {
             String::new()
         }
@@ -483,7 +509,7 @@ fn draw_signal_chart(frame: &mut Frame, app: &mut App, area: Rect, title: &str, 
                 } else {
                     slot.key_name.clone()
                 };
-                let legend_name = format!("{} [{:.0}..{:.0}]", short_name, sr.y_min, sr.y_max);
+                let legend_name = format!("{} {} [{:.0}..{:.0}]", short_name, slot.data_type, sr.y_min, sr.y_max);
                 datasets.push(Dataset::default()
                     .name(legend_name)
                     .marker(marker)
@@ -820,18 +846,18 @@ fn draw_help_popup(frame: &mut Frame, app: &App, area: Rect) {
     let key_style = Style::default().fg(Color::Green).add_modifier(Modifier::BOLD);
 
     let help_text = vec![
-        Line::from(Span::styled("Redis TUI — Keyboard Reference", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD))),
+        Line::from(Span::styled("Redis TUI — Controls Reference", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD))),
         Line::from(""),
         // --- Navigation ---
         Line::from(vec![Span::styled("Navigation", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD))]),
         Line::from(vec![
             Span::styled("  Up/Down  ", key_style),
-            Span::raw("Navigate the key list, scroll value view, or"),
+            Span::raw("Navigate keys, scroll value view, or select"),
         ]),
-        Line::from(Span::styled("            switch between Signal/FFT plots", dim)),
+        Line::from(Span::styled("            Signal/FFT sub-plot", dim)),
         Line::from(vec![
             Span::styled("  Enter    ", key_style),
-            Span::raw("Load the selected key's value and plot its data"),
+            Span::raw("Load the selected key's value"),
         ]),
         Line::from(vec![
             Span::styled("  Tab      ", key_style),
@@ -840,6 +866,10 @@ fn draw_help_popup(frame: &mut Frame, app: &App, area: Rect) {
         Line::from(vec![
             Span::styled("  Shift+Tab", key_style),
             Span::raw("  Cycle focus in reverse"),
+        ]),
+        Line::from(vec![
+            Span::styled("  0-9      ", key_style),
+            Span::raw("Switch to Redis database 0-9"),
         ]),
         Line::from(""),
         // --- Key Operations ---
@@ -856,14 +886,13 @@ fn draw_help_popup(frame: &mut Frame, app: &App, area: Rect) {
             Span::styled("  s        ", key_style),
             Span::raw("Edit the selected key's value"),
         ]),
-        Line::from(Span::styled("            Ctrl+B toggles binary encoding mode", dim)),
         Line::from(vec![
             Span::styled("  n        ", key_style),
-            Span::raw("Create a new key (string, list, hash, set, stream)"),
+            Span::raw("Create a new key (←/→ to choose type)"),
         ]),
         Line::from(vec![
             Span::styled("  d        ", key_style),
-            Span::raw("Delete the selected key (with confirmation)"),
+            Span::raw("Delete the selected key (y/n to confirm)"),
         ]),
         Line::from(vec![
             Span::styled("  R        ", key_style),
@@ -871,51 +900,74 @@ fn draw_help_popup(frame: &mut Frame, app: &App, area: Rect) {
         ]),
         Line::from(vec![
             Span::styled("  z        ", key_style),
-            Span::raw("Set TTL (expiry) on the selected key in seconds"),
+            Span::raw("Set TTL on the selected key (-1 to persist)"),
+        ]),
+        Line::from(""),
+        // --- Edit Mode ---
+        Line::from(vec![Span::styled("Edit Mode", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD))]),
+        Line::from(vec![
+            Span::styled("  Tab      ", key_style),
+            Span::raw("Next field"),
         ]),
         Line::from(vec![
-            Span::styled("  0-9      ", key_style),
-            Span::raw("Switch to Redis database 0-9"),
+            Span::styled("  Shift+Tab", key_style),
+            Span::raw("  Previous field"),
         ]),
+        Line::from(vec![
+            Span::styled("  Enter    ", key_style),
+            Span::raw("Submit (multi-entry types stay open)"),
+        ]),
+        Line::from(vec![
+            Span::styled("  Esc      ", key_style),
+            Span::raw("Cancel / close edit popup"),
+        ]),
+        Line::from(vec![
+            Span::styled("  Ctrl+B   ", key_style),
+            Span::raw("Toggle binary encoding mode"),
+        ]),
+        Line::from(vec![
+            Span::styled("  Ctrl+T   ", key_style),
+            Span::raw("Cycle binary data type (Int8..Float64)"),
+        ]),
+        Line::from(vec![
+            Span::styled("  Ctrl+E   ", key_style),
+            Span::raw("Toggle endianness (LE/BE)"),
+        ]),
+        Line::from(Span::styled("            Paste supported in all input fields", dim)),
         Line::from(""),
         // --- Streams ---
         Line::from(vec![Span::styled("Streams", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD))]),
         Line::from(vec![
             Span::styled("  l        ", key_style),
-            Span::raw("Start/stop live stream listener (XREAD)"),
+            Span::raw("Toggle live stream listener (up to 4 keys)"),
         ]),
-        Line::from(Span::styled("            Blocks on the selected stream key for new entries", dim)),
         Line::from(vec![
             Span::styled("  w        ", key_style),
-            Span::raw("Open signal generator config (for stream keys)"),
+            Span::raw("Toggle signal generator (sine/square/saw/tri)"),
         ]),
-        Line::from(Span::styled("            Generates sine/square/saw waves into the stream", dim)),
+        Line::from(Span::styled("            ←/→ to select wave type and data type", dim)),
         Line::from(""),
         // --- Data Plot ---
         Line::from(vec![Span::styled("Data Plot", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD))]),
         Line::from(vec![
             Span::styled("  p        ", key_style),
-            Span::raw("Show/hide the plot panel (hidden by default)"),
+            Span::raw("Toggle key in plot (up to 4, FIFO eviction)"),
         ]),
         Line::from(vec![
             Span::styled("  t / T    ", key_style),
-            Span::raw("Cycle data type: Int8..Float64, String, Blob"),
+            Span::raw("Cycle data type forward / backward"),
         ]),
         Line::from(vec![
             Span::styled("  e        ", key_style),
-            Span::raw("Toggle byte order: Little-Endian ↔ Big-Endian"),
+            Span::raw("Toggle endianness: Little ↔ Big"),
         ]),
         Line::from(vec![
             Span::styled("  a        ", key_style),
-            Span::raw("Auto-fit axis limits to data range"),
+            Span::raw("Auto-fit axis limits to data"),
         ]),
         Line::from(vec![
             Span::styled("  x        ", key_style),
-            Span::raw("Set manual X-axis limits on the focused plot"),
-        ]),
-        Line::from(vec![
-            Span::styled("  y        ", key_style),
-            Span::raw("Set manual Y-axis limits on the focused plot"),
+            Span::raw("Set plot axis limits (X + per-key Y)"),
         ]),
         Line::from(vec![
             Span::styled("  f        ", key_style),
@@ -923,19 +975,27 @@ fn draw_help_popup(frame: &mut Frame, app: &App, area: Rect) {
         ]),
         Line::from(vec![
             Span::styled("  g        ", key_style),
-            Span::raw("Toggle FFT Y-axis: linear ↔ log₁₀ scale"),
+            Span::raw("Toggle FFT scale: linear ↔ log"),
         ]),
-        Line::from(Span::styled("            Use Up/Down to switch focus between Signal and FFT", dim)),
         Line::from(""),
         // --- Mouse ---
-        Line::from(vec![Span::styled("Mouse (Plot)", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD))]),
+        Line::from(vec![Span::styled("Mouse", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD))]),
         Line::from(vec![
-            Span::styled("  Scroll   ", key_style),
-            Span::raw("Zoom in/out on the plot under the cursor"),
+            Span::styled("  Click    ", key_style),
+            Span::raw("Select a key in the key list"),
         ]),
         Line::from(vec![
+            Span::styled("  Scroll   ", key_style),
+            Span::raw("Key list / value view: scroll content"),
+        ]),
+        Line::from(Span::styled("            Data plot: zoom in/out at cursor", dim)),
+        Line::from(vec![
             Span::styled("  Drag     ", key_style),
-            Span::raw("Pan the plot view (X and Y axes)"),
+            Span::raw("Pan the plot (X and Y axes)"),
+        ]),
+        Line::from(vec![
+            Span::styled("  Shift    ", key_style),
+            Span::raw("Hold for native text selection + right-click copy"),
         ]),
         Line::from(""),
         // --- General ---
@@ -946,7 +1006,7 @@ fn draw_help_popup(frame: &mut Frame, app: &App, area: Rect) {
         ]),
         Line::from(vec![
             Span::styled("  q / Esc  ", key_style),
-            Span::raw("Quit the application (or close a popup)"),
+            Span::raw("Quit (or close popup)"),
         ]),
     ];
 

@@ -27,6 +27,8 @@ pub struct PlotSlot {
     pub key_name: String,
     pub data: Vec<f64>,
     pub color: Color,
+    pub data_type: DataType,
+    pub endianness: Endianness,
     pub y_min: Option<f64>,  // None = auto
     pub y_max: Option<f64>,  // None = auto
 }
@@ -160,9 +162,14 @@ pub struct App {
     pub hover_data_y: Option<f64>,
     pub hover_in_fft: bool,   // true if hovering in FFT chart
 
-    // Chart area rects (set during draw)
+    // Panel area rects (set during draw)
+    pub key_list_area: Option<(u16, u16, u16, u16)>,     // x, y, w, h
+    pub value_view_area: Option<(u16, u16, u16, u16)>,   // x, y, w, h
     pub signal_chart_area: Option<(u16, u16, u16, u16)>, // x, y, w, h (inner)
     pub fft_chart_area: Option<(u16, u16, u16, u16)>,
+
+    // Pending actions from mouse clicks (processed in main loop with client access)
+    pub pending_click_load: bool,
 
     // Connection
     pub db: i64,
@@ -257,8 +264,11 @@ impl App {
             hover_data_y: None,
             hover_in_fft: false,
 
+            key_list_area: None,
+            value_view_area: None,
             signal_chart_area: None,
             fft_chart_area: None,
+            pending_click_load: false,
 
             db: 0,
             db_size: 0,
@@ -310,6 +320,8 @@ impl App {
         self.plot_slots.push(PlotSlot {
             key_name: key_name.to_string(),
             data: Vec::new(),
+            data_type: self.data_type,
+            endianness: self.endianness,
             y_min: None,
             y_max: None,
             color,
@@ -322,15 +334,17 @@ impl App {
         self.plot_slots.iter().find(|s| s.key_name == key_name).map(|s| s.color)
     }
 
-    /// Update plot data for a specific slot by key name
+    /// Update plot data for a specific slot by key name, using the slot's own data type
     pub fn update_slot_data(&mut self, key_name: &str, value: &RedisValue) {
         if let Some(slot) = self.plot_slots.iter_mut().find(|s| s.key_name == key_name) {
+            let dt = slot.data_type;
+            let en = slot.endianness;
             slot.data = match value {
                 RedisValue::String(bytes) => {
-                    decode_blob(bytes, self.data_type, self.endianness)
+                    decode_blob(bytes, dt, en)
                 }
                 RedisValue::Stream(entries) => {
-                    extract_stream_plot_data(entries, self.data_type, self.endianness)
+                    extract_stream_plot_data(entries, dt, en)
                 }
                 RedisValue::List(items) => {
                     let mut data = Vec::new();
@@ -341,7 +355,7 @@ impl App {
                                 continue;
                             }
                         }
-                        data.extend(decode_blob(item, self.data_type, self.endianness));
+                        data.extend(decode_blob(item, dt, en));
                     }
                     data
                 }
@@ -357,7 +371,7 @@ impl App {
                                 continue;
                             }
                         }
-                        data.extend(decode_blob(val, self.data_type, self.endianness));
+                        data.extend(decode_blob(val, dt, en));
                     }
                     data
                 }
@@ -372,14 +386,16 @@ impl App {
         }
     }
 
-    /// Append stream entries to a specific plot slot
+    /// Append stream entries to a specific plot slot, using the slot's own data type
     pub fn append_slot_stream_entries(&mut self, key_name: &str, new_entries: &[StreamEntry]) {
         if let Some(slot) = self.plot_slots.iter_mut().find(|s| s.key_name == key_name) {
+            let dt = slot.data_type;
+            let en = slot.endianness;
             // Re-extract plot data from the newest entry
             if let Some(entry) = new_entries.last() {
                 for (fname, fval) in &entry.fields {
                     if fname.starts_with('_') {
-                        slot.data = decode_blob(fval, self.data_type, self.endianness);
+                        slot.data = decode_blob(fval, dt, en);
                         for v in &mut slot.data {
                             if !v.is_finite() {
                                 *v = 0.0;
@@ -632,9 +648,48 @@ impl App {
         }
     }
 
+    /// Cycle the data type for the currently selected key's plot slot (if plotted),
+    /// otherwise cycle the global data type. Then recompute.
+    pub fn cycle_data_type(&mut self, forward: bool) {
+        let new_type = if forward { self.data_type.next() } else { self.data_type.prev() };
+        // Update the slot for the selected key if it's plotted
+        if let Some(key) = self.selected_key_name().map(|s| s.to_string()) {
+            if let Some(slot) = self.plot_slots.iter_mut().find(|s| s.key_name == key) {
+                slot.data_type = if forward { slot.data_type.next() } else { slot.data_type.prev() };
+                self.data_type = slot.data_type;
+            } else {
+                self.data_type = new_type;
+            }
+        } else {
+            self.data_type = new_type;
+        }
+        self.recompute_plot();
+    }
+
+    /// Toggle endianness for the currently selected key's plot slot (if plotted),
+    /// otherwise toggle the global endianness. Then recompute.
+    pub fn toggle_endianness(&mut self) {
+        let new_end = self.endianness.toggle();
+        if let Some(key) = self.selected_key_name().map(|s| s.to_string()) {
+            if let Some(slot) = self.plot_slots.iter_mut().find(|s| s.key_name == key) {
+                slot.endianness = slot.endianness.toggle();
+                self.endianness = slot.endianness;
+            } else {
+                self.endianness = new_end;
+            }
+        } else {
+            self.endianness = new_end;
+        }
+        self.recompute_plot();
+    }
+
     pub fn recompute_plot(&mut self) {
         if let Some(value) = self.current_value.take() {
             self.update_plot_data(&value);
+            // Also update the plot slot for the currently viewed key
+            if let Some(key) = self.selected_key_name().map(|s| s.to_string()) {
+                self.update_slot_data(&key, &value);
+            }
             self.current_value = Some(value);
         }
         // Clear stale FFT data immediately so UI doesn't use mismatched data
@@ -827,7 +882,17 @@ impl App {
         if let Some((cx, cy, cw, ch)) = self.signal_chart_area {
             if col >= cx && col < cx + cw && row >= cy && row < cy + ch {
                 let (x0, x1) = self.signal_x_bounds();
-                let (y0, y1) = if self.plot_auto_limits {
+                // Match the Y bounds logic used by the chart renderer
+                let (y0, y1) = if self.plot_slots.len() > 1 {
+                    (-0.05, 1.05)
+                } else if !self.plot_slots.is_empty() {
+                    let slot = &self.plot_slots[0];
+                    if slot.y_min.is_some() && slot.y_max.is_some() {
+                        (slot.y_min.unwrap(), slot.y_max.unwrap())
+                    } else {
+                        self.auto_signal_bounds()
+                    }
+                } else if self.plot_auto_limits {
                     self.auto_signal_bounds()
                 } else {
                     (self.plot_y_min, self.plot_y_max)
@@ -840,35 +905,6 @@ impl App {
             }
         }
         None
-    }
-
-    pub fn apply_plot_limits(&mut self) -> Result<(), String> {
-        let y_min: f64 = self.edit_fields[0]
-            .1
-            .trim()
-            .parse()
-            .map_err(|_| "Invalid Y Min".to_string())?;
-        let y_max: f64 = self.edit_fields[1]
-            .1
-            .trim()
-            .parse()
-            .map_err(|_| "Invalid Y Max".to_string())?;
-        if y_min >= y_max {
-            return Err("Y Min must be less than Y Max".to_string());
-        }
-        match self.plot_focus {
-            PlotFocus::Signal => {
-                self.plot_y_min = y_min;
-                self.plot_y_max = y_max;
-                self.plot_auto_limits = false;
-            }
-            PlotFocus::FFT => {
-                self.fft_y_min = y_min;
-                self.fft_y_max = y_max;
-                self.fft_auto_limits = false;
-            }
-        }
-        Ok(())
     }
 
     /// Open plot settings popup: unified X limits + per-slot Y limits
@@ -968,31 +1004,14 @@ impl App {
         Ok(())
     }
 
+    #[allow(dead_code)]
     pub fn apply_x_limits(&mut self) -> Result<(), String> {
-        let x_min: f64 = self.edit_fields[0]
-            .1
-            .trim()
-            .parse()
-            .map_err(|_| "Invalid X Min".to_string())?;
-        let x_max: f64 = self.edit_fields[1]
-            .1
-            .trim()
-            .parse()
-            .map_err(|_| "Invalid X Max".to_string())?;
-        if x_min >= x_max {
-            return Err("X Min must be less than X Max".to_string());
-        }
-        match self.plot_focus {
-            PlotFocus::Signal => {
-                self.plot_x_min = x_min;
-                self.plot_x_max = x_max;
-            }
-            PlotFocus::FFT => {
-                self.fft_x_min = x_min;
-                self.fft_x_max = x_max;
-            }
-        }
-        Ok(())
+        self.apply_plot_settings()
+    }
+
+    #[allow(dead_code)]
+    pub fn apply_plot_limits(&mut self) -> Result<(), String> {
+        self.apply_plot_settings()
     }
 
     pub fn auto_signal_bounds(&self) -> (f64, f64) {
@@ -1461,9 +1480,9 @@ impl App {
         self.signal_gen_wave_idx = 0;
         self.signal_gen_dtype_idx = 6; // float32
         self.signal_gen_fields = vec![
-            ("Cycles/Entry".to_string(), "1.0".to_string()),
+            ("Cycles/Entry".to_string(), "2.0".to_string()),
             ("Amplitude".to_string(), "1.0".to_string()),
-            ("Noise".to_string(), "0.0".to_string()),
+            ("Noise".to_string(), "0.1".to_string()),
             ("Samples/Entry".to_string(), "100".to_string()),
             ("Entries/Sec".to_string(), "10.0".to_string()),
         ];
