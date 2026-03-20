@@ -318,15 +318,11 @@ fn run_app(
                     // Suppress redraws so native text selection persists
                     shift_selecting = true;
                 } else if shift_selecting {
-                    // Non-shift mouse event while selecting: a click elsewhere
-                    // clears the selection, but plain mouse-up/move after releasing
-                    // shift should keep the selection until an explicit action
-                    match mouse.kind {
-                        MouseEventKind::Down(_) => {
-                            shift_selecting = false;
-                            handle_mouse_event(&mut app, mouse);
-                        }
-                        _ => {} // ignore move/up/scroll — keep selection visible
+                    // While selection is active, ignore all mouse events to
+                    // keep the selection visible. Only a click clears it.
+                    if matches!(mouse.kind, MouseEventKind::Down(_)) {
+                        shift_selecting = false;
+                        handle_mouse_event(&mut app, mouse);
                     }
                 } else {
                     handle_mouse_event(&mut app, mouse);
