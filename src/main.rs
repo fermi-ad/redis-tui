@@ -995,19 +995,7 @@ fn handle_plot_limit_input(app: &mut App, code: KeyCode) {
             }
         }
         KeyCode::Enter => {
-            // Detect if this is the combined 4-field settings popup or a legacy 2-field one
-            let result = if app.edit_fields.len() == 4 {
-                app.apply_plot_settings()
-            } else {
-                let is_x_limit = app.edit_fields.first()
-                    .map(|(label, _)| label.contains("X Min"))
-                    .unwrap_or(false);
-                if is_x_limit {
-                    app.apply_x_limits()
-                } else {
-                    app.apply_plot_limits()
-                }
-            };
+            let result = app.apply_plot_settings();
             match result {
                 Ok(_) => {
                     app.status_message = "Plot settings applied".to_string();

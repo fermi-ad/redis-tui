@@ -423,18 +423,24 @@ fn draw_signal_chart(frame: &mut Frame, app: &mut App, area: Rect, title: &str, 
     let (y_lo, y_hi) = if app.plot_slots.len() > 1 {
         // Multi-key: always normalized 0-1, per-key Y scales rendered separately
         (-0.05, 1.05)
-    } else if !app.plot_slots.is_empty() && app.plot_auto_limits {
-        // Single slot, auto: use its actual bounds
-        let all_data: Vec<f64> = app.plot_slots[0].data.iter().copied()
-            .filter(|v| v.is_finite()).collect();
-        if all_data.is_empty() {
-            (0.0, 1.0)
+    } else if !app.plot_slots.is_empty() {
+        let slot = &app.plot_slots[0];
+        if slot.y_min.is_some() && slot.y_max.is_some() {
+            // Manual per-slot limits
+            (slot.y_min.unwrap(), slot.y_max.unwrap())
         } else {
-            let y_min = all_data.iter().copied().fold(f64::INFINITY, f64::min);
-            let y_max = all_data.iter().copied().fold(f64::NEG_INFINITY, f64::max);
-            let range = y_max - y_min;
-            let pad = if range == 0.0 { 1.0 } else { range * 0.1 };
-            (y_min - pad, y_max + pad)
+            // Auto: use actual data bounds
+            let all_data: Vec<f64> = slot.data.iter().copied()
+                .filter(|v| v.is_finite()).collect();
+            if all_data.is_empty() {
+                (0.0, 1.0)
+            } else {
+                let y_min = all_data.iter().copied().fold(f64::INFINITY, f64::min);
+                let y_max = all_data.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+                let range = y_max - y_min;
+                let pad = if range == 0.0 { 1.0 } else { range * 0.1 };
+                (y_min - pad, y_max + pad)
+            }
         }
     } else if app.plot_auto_limits {
         app.auto_signal_bounds()

@@ -897,35 +897,6 @@ impl App {
         None
     }
 
-    pub fn apply_plot_limits(&mut self) -> Result<(), String> {
-        let y_min: f64 = self.edit_fields[0]
-            .1
-            .trim()
-            .parse()
-            .map_err(|_| "Invalid Y Min".to_string())?;
-        let y_max: f64 = self.edit_fields[1]
-            .1
-            .trim()
-            .parse()
-            .map_err(|_| "Invalid Y Max".to_string())?;
-        if y_min >= y_max {
-            return Err("Y Min must be less than Y Max".to_string());
-        }
-        match self.plot_focus {
-            PlotFocus::Signal => {
-                self.plot_y_min = y_min;
-                self.plot_y_max = y_max;
-                self.plot_auto_limits = false;
-            }
-            PlotFocus::FFT => {
-                self.fft_y_min = y_min;
-                self.fft_y_max = y_max;
-                self.fft_auto_limits = false;
-            }
-        }
-        Ok(())
-    }
-
     /// Open plot settings popup: unified X limits + per-slot Y limits
     pub fn start_plot_settings(&mut self) {
         let (x_min, x_max) = match self.plot_focus {
@@ -1023,31 +994,14 @@ impl App {
         Ok(())
     }
 
+    #[allow(dead_code)]
     pub fn apply_x_limits(&mut self) -> Result<(), String> {
-        let x_min: f64 = self.edit_fields[0]
-            .1
-            .trim()
-            .parse()
-            .map_err(|_| "Invalid X Min".to_string())?;
-        let x_max: f64 = self.edit_fields[1]
-            .1
-            .trim()
-            .parse()
-            .map_err(|_| "Invalid X Max".to_string())?;
-        if x_min >= x_max {
-            return Err("X Min must be less than X Max".to_string());
-        }
-        match self.plot_focus {
-            PlotFocus::Signal => {
-                self.plot_x_min = x_min;
-                self.plot_x_max = x_max;
-            }
-            PlotFocus::FFT => {
-                self.fft_x_min = x_min;
-                self.fft_x_max = x_max;
-            }
-        }
-        Ok(())
+        self.apply_plot_settings()
+    }
+
+    #[allow(dead_code)]
+    pub fn apply_plot_limits(&mut self) -> Result<(), String> {
+        self.apply_plot_settings()
     }
 
     pub fn auto_signal_bounds(&self) -> (f64, f64) {
