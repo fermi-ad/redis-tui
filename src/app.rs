@@ -643,6 +643,10 @@ impl App {
     pub fn recompute_plot(&mut self) {
         if let Some(value) = self.current_value.take() {
             self.update_plot_data(&value);
+            // Also update the plot slot for the currently viewed key
+            if let Some(key) = self.selected_key_name().map(|s| s.to_string()) {
+                self.update_slot_data(&key, &value);
+            }
             self.current_value = Some(value);
         }
         // Clear stale FFT data immediately so UI doesn't use mismatched data
