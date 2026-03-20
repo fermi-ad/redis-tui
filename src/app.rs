@@ -882,7 +882,17 @@ impl App {
         if let Some((cx, cy, cw, ch)) = self.signal_chart_area {
             if col >= cx && col < cx + cw && row >= cy && row < cy + ch {
                 let (x0, x1) = self.signal_x_bounds();
-                let (y0, y1) = if self.plot_auto_limits {
+                // Match the Y bounds logic used by the chart renderer
+                let (y0, y1) = if self.plot_slots.len() > 1 {
+                    (-0.05, 1.05)
+                } else if !self.plot_slots.is_empty() {
+                    let slot = &self.plot_slots[0];
+                    if slot.y_min.is_some() && slot.y_max.is_some() {
+                        (slot.y_min.unwrap(), slot.y_max.unwrap())
+                    } else {
+                        self.auto_signal_bounds()
+                    }
+                } else if self.plot_auto_limits {
                     self.auto_signal_bounds()
                 } else {
                     (self.plot_y_min, self.plot_y_max)

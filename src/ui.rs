@@ -457,10 +457,28 @@ fn draw_signal_chart(frame: &mut Frame, app: &mut App, area: Rect, title: &str, 
         border_color
     };
 
-    // Build title with hover coords
+    // Build title with hover coords — show Y value for each plotted key
     let hover_suffix = if !app.hover_in_fft {
-        if let (Some(hx), Some(hy)) = (app.hover_data_x, app.hover_data_y) {
-            format!(" x:{:.1} y:{:.2}", hx, hy)
+        if let Some(hx) = app.hover_data_x {
+            let x_idx = hx.round() as usize;
+            if !app.plot_slots.is_empty() {
+                let mut parts = vec![format!(" x:{:.0}", hx)];
+                for slot in &app.plot_slots {
+                    if let Some(&val) = slot.data.get(x_idx) {
+                        let short = if slot.key_name.len() > 8 {
+                            format!("{}...", &slot.key_name[..8])
+                        } else {
+                            slot.key_name.clone()
+                        };
+                        parts.push(format!("{}:{:.2}", short, val));
+                    }
+                }
+                parts.join(" ")
+            } else if let Some(hy) = app.hover_data_y {
+                format!(" x:{:.1} y:{:.2}", hx, hy)
+            } else {
+                String::new()
+            }
         } else {
             String::new()
         }
