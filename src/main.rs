@@ -315,15 +315,18 @@ fn run_app(
             // Handle mouse events (shift-bypass: let terminal handle native selection)
             if let Event::Mouse(mouse) = ev {
                 if mouse.modifiers.contains(KeyModifiers::SHIFT) {
-                    // Track shift-select state to suppress redraws
-                    match mouse.kind {
-                        MouseEventKind::Down(_) => shift_selecting = true,
-                        MouseEventKind::Up(_) => shift_selecting = false,
-                        _ => {}
-                    }
+                    // Suppress redraws so native text selection persists
+                    shift_selecting = true;
                 } else {
                     shift_selecting = false;
                     handle_mouse_event(&mut app, mouse);
+                }
+            }
+
+            // Release shift-selection when any key is pressed without shift
+            if let Event::Key(ref key) = ev {
+                if !key.modifiers.contains(KeyModifiers::SHIFT) {
+                    shift_selecting = false;
                 }
             }
 
@@ -1117,15 +1120,15 @@ fn handle_mouse_event(app: &mut App, mouse: MouseEvent) {
             app.mouse_dragging = false;
         }
         MouseEventKind::ScrollUp => {
-            // Scroll key list if mouse is over it
+            // Scroll key list viewport (without changing selection)
             if let Some((kx, ky, kw, kh)) = app.key_list_area {
                 if col >= kx && col < kx + kw && row >= ky && row < ky + kh {
-                    app.select_prev_key();
-                    app.pending_click_load = true;
+                    let offset = app.key_list_state.offset_mut();
+                    *offset = offset.saturating_sub(1);
                     return;
                 }
             }
-            // Scroll value view if mouse is over it
+            // Scroll value view
             if let Some((vx, vy, vw, vh)) = app.value_view_area {
                 if col >= vx && col < vx + vw && row >= vy && row < vy + vh {
                     app.scroll_value_up();
@@ -1144,15 +1147,18 @@ fn handle_mouse_event(app: &mut App, mouse: MouseEvent) {
             }
         }
         MouseEventKind::ScrollDown => {
-            // Scroll key list if mouse is over it
+            // Scroll key list viewport (without changing selection)
             if let Some((kx, ky, kw, kh)) = app.key_list_area {
                 if col >= kx && col < kx + kw && row >= ky && row < ky + kh {
-                    app.select_next_key();
-                    app.pending_click_load = true;
+                    let max_offset = app.keys.len().saturating_sub(1);
+                    let offset = app.key_list_state.offset_mut();
+                    if *offset < max_offset {
+                        *offset += 1;
+                    }
                     return;
                 }
             }
-            // Scroll value view if mouse is over it
+            // Scroll value view
             if let Some((vx, vy, vw, vh)) = app.value_view_area {
                 if col >= vx && col < vx + vw && row >= vy && row < vy + vh {
                     app.scroll_value_down();
