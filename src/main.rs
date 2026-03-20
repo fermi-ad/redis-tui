@@ -312,20 +312,23 @@ fn run_app(
         if event::poll(Duration::from_millis(50))? {
             let ev = event::read()?;
 
-            // Handle mouse events (shift/alt bypass: let terminal handle native selection)
+            // Handle mouse events (shift bypass: let terminal handle native selection)
+            // Shift+drag = line select, Shift+Alt+drag = block/rectangular select
             if let Event::Mouse(mouse) = ev {
-                let selecting_modifier = mouse.modifiers.contains(KeyModifiers::SHIFT)
-                    || mouse.modifiers.contains(KeyModifiers::ALT);
-                if selecting_modifier {
-                    // Suppress redraws so native text selection persists
-                    // Shift = line select, Alt = block/rectangular select
-                    shift_selecting = true;
-                } else if shift_selecting {
-                    // While selection is active, ignore all mouse events to
-                    // keep the selection visible. Only a click clears it.
-                    if matches!(mouse.kind, MouseEventKind::Down(_)) {
+                if shift_selecting {
+                    // While selection is active, consume all mouse events to
+                    // prevent redraws. Only a plain click (no modifiers) clears it.
+                    if !mouse.modifiers.contains(KeyModifiers::SHIFT)
+                        && matches!(mouse.kind, MouseEventKind::Down(_))
+                    {
                         shift_selecting = false;
                         handle_mouse_event(&mut app, mouse);
+                    }
+                    // Otherwise: swallow the event entirely (don't let terminal see it)
+                } else if mouse.modifiers.contains(KeyModifiers::SHIFT) {
+                    // Starting a new selection — only activate on drag/down
+                    if matches!(mouse.kind, MouseEventKind::Down(_) | MouseEventKind::Drag(_)) {
+                        shift_selecting = true;
                     }
                 } else {
                     handle_mouse_event(&mut app, mouse);
