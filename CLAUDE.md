@@ -1,0 +1,108 @@
+# CLAUDE.md
+
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+
+## Build & Test Commands
+
+```bash
+cargo build                    # Dev build
+cargo build --release          # Release build (binary at target/release/redis-tui)
+cargo test                     # Run all tests
+cargo test app::tests          # Run only app module tests
+cargo test data::tests         # Run only data module tests
+cargo test ui::tests           # Run only UI tests
+cargo test <test_name>         # Run a single test by name
+cargo clippy                   # Lint
+cargo fmt                      # Format
+```
+
+**Docker:**
+```bash
+docker build -t redis-tui .
+docker run -it --rm --network host redis-tui
+```
+
+**Dev environment** (requires `redis-server`, `redis-cli`, `python3`):
+```bash
+./start-dev.sh    # Starts 2 Redis instances with test data, launches TUI in multi-host mode
+```
+
+## Architecture
+
+Four source modules in `src/`, single binary:
+
+- **`main.rs`** — CLI parsing, terminal setup/teardown (raw mode, mouse capture, bracketed paste), event loop (50ms tick), background thread lifecycle (`StreamListener`, `SignalGenerator`), input routing by `InputMode`, mouse event handling (click-to-select, scroll per-pane, shift-bypass)
+- **`app.rs`** — All application state (`App` struct), Redis data loading, plot/FFT computation, edit operations, multi-key slot management with per-key data types
+- **`data.rs`** — Binary data encoding/decoding (`DataType` × `Endianness` → `Vec<f64>`), hex formatting, value parsing. `is_binary()` only checks for control chars — do NOT use it to gate binary display for `_`-prefixed stream fields or when a numeric DataType is selected
+- **`redis_client.rs`** — `RedisClient` (single host) and `MultiRedisClient` (aggregated multi-host with collision detection), all Redis commands
+- **`ui.rs`** — ratatui rendering: layout (key list / value view / data plot), charts (signal + FFT), popups (filter, edit, help, confirm, signal gen, plot settings), crosshair drawing, per-key Y-axis labels and hover values
+
+### Data Flow
+
+```
+Redis → MultiRedisClient → App state → ui::draw()
+                              ↑
+         StreamListener ──────┘ (mpsc channel, bounded drain 20/tick)
+         SignalGenerator ──────→ Redis (XADD + XTRIM 100)
+         FFT thread ───────────→ App.fft_rx (mpsc, polled via try_recv)
+```
+
+### Threading Model
+
+The main thread owns all `App` state and renders UI. Background threads communicate only via `mpsc::channel` (stream data, FFT results) and `Arc<AtomicBool>` (stop flags). No shared mutable state.
+
+- **StreamListener**: per-key XREAD loop (1s block timeout), up to 4 concurrent
+- **SignalGenerator**: per-key waveform writer, up to 4 concurrent
+- **FFT**: one-shot computation, at most 1 in-flight (`fft_computing` guard + `fft_dirty` flag for re-trigger)
+- All stops are non-blocking during normal operation (detached join threads); only blocking on app exit
+
+### Key Constants (app.rs)
+
+| Constant | Value | Purpose |
+|----------|-------|---------|
+| `MAX_PLOT_SLOTS` | 4 | Simultaneous plotted keys |
+| `MAX_STREAM_ENTRIES` | 10 | In-memory stream entries (only last 5 displayed, last entry plotted) |
+| `PLOT_WINDOW` | 2,000 | Auto-range visible data points |
+
+### Per-Key Data Types
+
+Each `PlotSlot` stores its own `data_type` and `endianness`. Pressing `t`/`T`/`e` changes the type for the currently selected key's slot only. The global `app.data_type` syncs to the selected slot's type so the value view title stays accurate. When decoding slot data (`update_slot_data`, `append_slot_stream_entries`), always use the slot's own type, not the global.
+
+### Input Modes
+
+The event loop routes keyboard input based on `app.input_mode`: `Normal`, `Filter`, `Confirm`, `Help`, `Edit`, `PlotLimit`, `SignalGen`. Each has a dedicated handler function in `main.rs`.
+
+### Mouse Handling
+
+- **Click on key list**: Maps row to key index via `key_list_area` + `key_list_state.offset()`, sets `pending_click_load` flag (processed in main loop with client access)
+- **Scroll**: Over key list = viewport scroll (offset only, no selection change). Over value view = content scroll. Over plot = zoom.
+- **Shift held**: All mouse events bypassed — terminal handles native text selection. Redraws suppressed while `shift_selecting` is true. Cleared only by non-modifier keypress or non-shift click.
+- **Bracketed paste**: Enabled on startup. `Event::Paste(data)` appends to active input field based on current InputMode.
+- **Panel areas**: `key_list_area`, `value_view_area`, `signal_chart_area`, `fft_chart_area` stored during draw for mouse hit-testing.
+
+### Chart Y-Axis Bounds
+
+The chart Y bounds must match between `ui.rs` rendering and `app.rs` `mouse_to_data()`:
+- Multi-key (>1 slot): normalized `(-0.05, 1.05)`
+- Single slot with manual limits: `(slot.y_min, slot.y_max)`
+- Single slot auto: computed from data bounds
+- No slots: `app.plot_y_min/max` or auto
+
+### Tests
+
+Tests are `#[cfg(test)]` modules at the bottom of `data.rs`, `app.rs`, and `ui.rs`. No integration tests (single-binary TUI). Tests in `ui.rs` use `ratatui::backend::TestBackend` for rendering verification.
+
+## Conventions
+
+- Stream plot data uses `_`-prefixed field names in stream entries for binary waveform data
+- `_`-prefixed stream fields are ALWAYS decoded as binary — never gate on `is_binary()`
+- String values show decoded binary when a numeric DataType is selected (not String/Blob)
+- `RedisValue::Stream` entries are capped via `cap_stream_entries()` on load, refresh, and append
+- Arrow key navigation auto-loads the selected key's value (`load_selected_value`)
+- Mouse capture must be disabled before any blocking thread joins on exit (prevents terminal garbage)
+- Panic hook only runs terminal cleanup on the main thread
+- Version tests use `env!("CARGO_PKG_VERSION")` — never hardcode version strings
+- Never push directly to main without explicit permission — use feature branches and PRs
+- Never include Claude Code attribution in PRs or commits
+- Never include Co-Authored-By lines in commits
+- `apply_plot_settings()` handles all field counts (X limits + per-slot Y limits) — no field count checks
