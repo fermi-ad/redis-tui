@@ -317,17 +317,25 @@ fn run_app(
                 if mouse.modifiers.contains(KeyModifiers::SHIFT) {
                     // Suppress redraws so native text selection persists
                     shift_selecting = true;
+                } else if shift_selecting {
+                    // Non-shift mouse event while selecting: a click elsewhere
+                    // clears the selection, but plain mouse-up/move after releasing
+                    // shift should keep the selection until an explicit action
+                    match mouse.kind {
+                        MouseEventKind::Down(_) => {
+                            shift_selecting = false;
+                            handle_mouse_event(&mut app, mouse);
+                        }
+                        _ => {} // ignore move/up/scroll — keep selection visible
+                    }
                 } else {
-                    shift_selecting = false;
                     handle_mouse_event(&mut app, mouse);
                 }
             }
 
-            // Release shift-selection when any key is pressed without shift
-            if let Event::Key(ref key) = ev {
-                if !key.modifiers.contains(KeyModifiers::SHIFT) {
-                    shift_selecting = false;
-                }
+            // Any keypress clears shift-selection (user is done copying)
+            if let Event::Key(_) = ev {
+                shift_selecting = false;
             }
 
             // Handle paste events (bracketed paste from terminal)
