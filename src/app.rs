@@ -1516,9 +1516,9 @@ impl App {
         self.signal_gen_wave_idx = 0;
         self.signal_gen_dtype_idx = 6; // float32
         self.signal_gen_fields = vec![
-            ("Cycles/Entry".to_string(), "1.0".to_string()),
+            ("Cycles/Entry".to_string(), "2.0".to_string()),
             ("Amplitude".to_string(), "1.0".to_string()),
-            ("Noise".to_string(), "0.0".to_string()),
+            ("Noise".to_string(), "0.1".to_string()),
             ("Samples/Entry".to_string(), "100".to_string()),
             ("Entries/Sec".to_string(), "10.0".to_string()),
         ];
