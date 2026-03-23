@@ -363,7 +363,7 @@ impl App {
 
             rate_view: false,
             rate_history_secs: 1200, // 20 minutes default (overridden by CLI)
-            rate_avg_window_secs: 60,
+            rate_avg_window_secs: 2,  // 2 seconds default (overridden by CLI)
             rate_trackers: HashMap::new(),
         }
     }
@@ -481,7 +481,7 @@ impl App {
 
     /// Update the ingestion rate tracker for a stream key with newly received entries.
     /// Called from the main loop drain for every active StreamListener.
-    pub fn update_rate_tracker(&mut self, key_name: &str, new_entries: &[StreamEntry]) {
+    pub fn update_rate_tracker(&mut self, key_name: &str, new_entries: &[StreamEntry], now_ms: u64) {
         let history_secs = self.rate_history_secs;
 
         // Parse unix_ms from entry IDs (format: "{unix_ms}-{seq}")
@@ -522,11 +522,6 @@ impl App {
             }
         }
 
-        let now_ms = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_millis() as u64;
-
         // Keep 60s of timestamps — enough to compute all multi-window averages (1s..30s)
         // and to use the stable 30s window for gap detection.
         for ms in &new_ms {
@@ -564,6 +559,9 @@ impl App {
                 break;
             }
         }
+
+        // Prune gaps that are older than the history window
+        tracker.gaps.retain(|&ts| ts >= history_cutoff_ms);
 
         tracker.last_entry_ms = new_ms.last().copied();
         tracker.total_entries += new_entries.len() as u64;
@@ -2105,5 +2103,159 @@ mod tests {
         assert!(joined.contains("[uint16]"), "should show uint16 label, got:\n{}", joined);
         assert!(joined.contains("256"), "should contain decoded value 256, got:\n{}", joined);
         assert!(joined.contains("512"), "should contain decoded value 512, got:\n{}", joined);
+    }
+
+    // ── RateTracker tests ──────────────────────────────────────────────────────
+
+    fn make_entry(unix_ms: u64) -> crate::redis_client::StreamEntry {
+        crate::redis_client::StreamEntry {
+            id: format!("{}-0", unix_ms),
+            fields: vec![],
+        }
+    }
+
+    #[test]
+    fn compute_five_num_empty() {
+        let empty: VecDeque<(u64, f64)> = VecDeque::new();
+        assert!(compute_five_num(&empty).is_none());
+    }
+
+    #[test]
+    fn compute_five_num_single() {
+        let mut h = VecDeque::new();
+        h.push_back((0, 5.0));
+        let result = compute_five_num(&h).unwrap();
+        assert_eq!(result, [5.0, 5.0, 5.0, 5.0, 5.0]);
+    }
+
+    #[test]
+    fn compute_five_num_known_values() {
+        // Sorted: [1, 2, 3, 4, 5] — min=1 Q1=2 med=3 Q3=4 max=5
+        let mut h = VecDeque::new();
+        for v in [3.0, 1.0, 5.0, 2.0, 4.0] {
+            h.push_back((0, v));
+        }
+        let [min, q1, med, q3, max] = compute_five_num(&h).unwrap();
+        assert_eq!(min, 1.0);
+        assert_eq!(med, 3.0);
+        assert_eq!(max, 5.0);
+        assert!((q1 - 2.0).abs() < 1e-9);
+        assert!((q3 - 4.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn rate_for_window_counts_within_window() {
+        let mut tracker = RateTracker::default();
+        let now_ms: u64 = 10_000;
+        // 5 entries at 1s intervals, all clearly within a 5s window (none at the boundary)
+        // now-4000, now-3000, now-2000, now-1000, now → cutoff = now-5000 → all 5 included
+        for i in 0..5u64 {
+            tracker.entry_timestamps.push_back(now_ms - (4 - i) * 1000);
+        }
+        let rate = tracker.rate_for_window(5, now_ms);
+        assert!((rate - 1.0).abs() < 1e-9, "expected 1.0/s, got {}", rate);
+    }
+
+    #[test]
+    fn rate_for_window_zero_window() {
+        let tracker = RateTracker::default();
+        assert_eq!(tracker.rate_for_window(0, 1000), 0.0);
+    }
+
+    #[test]
+    fn update_rate_tracker_warmup_gates_history() {
+        let mut app = App::new();
+        app.rate_avg_window_secs = 5; // 5s warmup
+
+        // now_ms = base_ms: first call sets tracking_start_ms = base_ms; 0s elapsed < 5s warmup
+        let base_ms: u64 = 1_700_000_000_000; // realistic timestamp
+        let entries: Vec<_> = (0..10).map(|i| make_entry(base_ms + i * 100)).collect();
+        app.update_rate_tracker("k", &entries, base_ms);
+
+        let tracker = app.rate_trackers.get("k").unwrap();
+        assert!(tracker.rate_history.is_empty(), "rate_history should be empty during warmup");
+        assert!(tracker.tracking_start_ms.is_some());
+    }
+
+    #[test]
+    fn update_rate_tracker_records_after_warmup() {
+        let mut app = App::new();
+        app.rate_avg_window_secs = 1; // 1s warmup
+
+        let base_ms: u64 = 1_700_000_000_000;
+        // First batch — now_ms = base_ms, sets tracking_start_ms = base_ms
+        let batch1: Vec<_> = (0..5).map(|i| make_entry(base_ms + i * 100)).collect();
+        app.update_rate_tracker("k", &batch1, base_ms);
+
+        // Second call — now_ms is 2s later, well past the 1s warmup
+        let now2 = base_ms + 2000;
+        let batch2: Vec<_> = (0..5).map(|i| make_entry(now2 + i * 100)).collect();
+        app.update_rate_tracker("k", &batch2, now2);
+
+        let tracker = app.rate_trackers.get("k").unwrap();
+        assert!(!tracker.rate_history.is_empty(), "should have recorded rate after warmup elapsed");
+    }
+
+    #[test]
+    fn update_rate_tracker_gap_detection() {
+        let mut app = App::new();
+        app.rate_avg_window_secs = 1;
+
+        let base_ms: u64 = 1_700_000_000_000;
+        // 300 entries at 100ms apart → fills the 30s reference window at ~10/s
+        // With current_rate = 10/s, threshold = (100ms * 1.85).max(500ms) = 500ms
+        let batch1: Vec<_> = (0..300).map(|i| make_entry(base_ms + i * 100)).collect();
+        app.update_rate_tracker("k", &batch1, base_ms);
+
+        // Jump of 2000ms from last entry (base+29900ms → base+31900ms)
+        // gap_ms = 2000ms > threshold 500ms → gap detected
+        let last_ms = base_ms + 299 * 100; // base + 29900
+        let gap_start = last_ms + 2000;    // base + 31900
+        let now2 = base_ms + 35_000;
+        let batch2: Vec<_> = (0..5).map(|i| make_entry(gap_start + i * 100)).collect();
+        app.update_rate_tracker("k", &batch2, now2);
+
+        let tracker = app.rate_trackers.get("k").unwrap();
+        assert_eq!(tracker.gaps.len(), 1, "should detect exactly one gap");
+        assert_eq!(tracker.gaps[0], gap_start);
+    }
+
+    #[test]
+    fn update_rate_tracker_prunes_gaps_to_history_window() {
+        let mut app = App::new();
+        app.rate_avg_window_secs = 1;
+        app.rate_history_secs = 10; // 10s history
+
+        let base_ms: u64 = 1_700_000_000_000;
+
+        // Batch 1: sets tracking start
+        let batch1: Vec<_> = (0..10).map(|i| make_entry(base_ms + i * 100)).collect();
+        app.update_rate_tracker("k", &batch1, base_ms);
+
+        // Inject an old gap that's outside the 10s history window
+        let old_gap = base_ms - 20_000; // 20s before base
+        app.rate_trackers.get_mut("k").unwrap().gaps.push(old_gap);
+        assert_eq!(app.rate_trackers["k"].gaps.len(), 1);
+
+        // now_ms = base + 15s → history_cutoff = base + 15s - 10s = base + 5s
+        // old_gap = base - 20s → old_gap < cutoff → should be pruned
+        let now2 = base_ms + 15_000;
+        let batch2: Vec<_> = (0..5).map(|i| make_entry(now2 + i * 100)).collect();
+        app.update_rate_tracker("k", &batch2, now2);
+
+        let tracker = app.rate_trackers.get("k").unwrap();
+        assert!(!tracker.gaps.contains(&old_gap), "old gap should have been pruned");
+    }
+
+    #[test]
+    fn clear_rate_tracker_removes_entry() {
+        let mut app = App::new();
+        app.rate_avg_window_secs = 1;
+        let base_ms: u64 = 1_700_000_000_000;
+        let entries: Vec<_> = (0..3).map(|i| make_entry(base_ms + i * 1000)).collect();
+        app.update_rate_tracker("k", &entries, base_ms);
+        assert!(app.rate_trackers.contains_key("k"));
+        app.clear_rate_tracker("k");
+        assert!(!app.rate_trackers.contains_key("k"));
     }
 }

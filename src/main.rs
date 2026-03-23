@@ -47,11 +47,11 @@ struct Args {
     hosts_file: Option<String>,
 
     /// Rolling window for ingestion rate chart history (minutes)
-    #[arg(long, default_value_t = 20)]
+    #[arg(long, default_value_t = 20, value_parser = clap::value_parser!(u64).range(1..))]
     rate_history: u64,
 
     /// Sliding window for the plotted ingestion rate line (seconds)
-    #[arg(long, default_value_t = 2)]
+    #[arg(long, default_value_t = 2, value_parser = clap::value_parser!(u64).range(1..))]
     rate_avg_window: u64,
 }
 
@@ -536,6 +536,10 @@ fn run_app(
 
         // Drain new stream entries from all background listeners (bounded per tick)
         const MAX_DRAIN_PER_TICK: usize = 20;
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as u64;
         let viewed_key = app.selected_key_name().map(|s| s.to_string());
         for listener in &stream_listeners {
             let mut total_new = 0;
@@ -544,7 +548,7 @@ fn run_app(
                 match listener.rx.try_recv() {
                     Ok(entries) => {
                         total_new += entries.len();
-                        app.update_rate_tracker(&listener.watching_key, &entries);
+                        app.update_rate_tracker(&listener.watching_key, &entries, now_ms);
                         app.append_slot_stream_entries(&listener.watching_key, &entries);
                         // Only update main view state if this listener matches the viewed key
                         if viewed_key.as_deref() == Some(listener.watching_key.as_str()) {
@@ -719,10 +723,13 @@ fn handle_normal_input(
         }
 
         KeyCode::Char('i') => {
-            if app.is_viewing_stream() {
+            if app.rate_view {
+                // Always allow toggling off regardless of current key
+                app.rate_view = false;
+            } else if app.is_viewing_stream() {
                 if let Some(k) = app.selected_key_name().map(|s| s.to_string()) {
                     if app.listening_keys.contains(&k) {
-                        app.rate_view = !app.rate_view;
+                        app.rate_view = true;
                     } else {
                         app.status_message = "Rate view: start listening first ([l])".to_string();
                     }

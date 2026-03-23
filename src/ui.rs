@@ -394,12 +394,6 @@ fn draw_rate_view(frame: &mut Frame, app: &App, area: Rect) {
     let gap_count = tracker.gaps.len();
     let total = tracker.total_entries;
 
-    // Build header: "1s:12.3  5s:11.8  10s:11.5  20s:11.3  30s:11.2 /s | 1234 entries | 2 gaps"
-    let avg_str: String = window_rates
-        .iter()
-        .map(|(label, rate)| format!("{}: {:.1}", label, rate))
-        .collect::<Vec<_>>()
-        .join("  ");
     let gap_label = if gap_count > 0 {
         format!("  | {} gap{}", gap_count, if gap_count == 1 { "" } else { "s" })
     } else {
