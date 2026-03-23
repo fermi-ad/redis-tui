@@ -45,6 +45,14 @@ struct Args {
     /// Connects to all listed hosts and aggregates keys.
     #[arg(long)]
     hosts_file: Option<String>,
+
+    /// Rolling window for ingestion rate chart history (minutes)
+    #[arg(long, default_value_t = 20)]
+    rate_history: u64,
+
+    /// Sliding window for the plotted ingestion rate line (seconds)
+    #[arg(long, default_value_t = 2)]
+    rate_avg_window: u64,
 }
 
 impl Args {
@@ -142,7 +150,7 @@ fn main() -> Result<()> {
     let mut terminal = Terminal::new(backend).context("Failed to create terminal")?;
 
     // Run app
-    let result = run_app(&mut terminal, &mut client);
+    let result = run_app(&mut terminal, &mut client, args.rate_history * 60, args.rate_avg_window);
 
     // Restore terminal
     disable_raw_mode().context("Failed to disable raw mode")?;
@@ -288,10 +296,14 @@ impl Drop for SignalGenerator {
 fn run_app(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     client: &mut MultiRedisClient,
+    rate_history_secs: u64,
+    rate_avg_window_secs: u64,
 ) -> Result<()> {
     let mut app = App::new();
     app.db = client.db;
     app.host_count = client.host_count();
+    app.rate_history_secs = rate_history_secs;
+    app.rate_avg_window_secs = rate_avg_window_secs;
 
     // Initial key load
     app.refresh_keys(client);
@@ -469,6 +481,8 @@ fn run_app(
                                     if let Some(h) = sl.handle.take() {
                                         std::thread::spawn(move || { let _ = h.join(); });
                                     }
+                                    app.clear_rate_tracker(&k);
+                                    app.rate_view = false;
                                     app.status_message = format!("Stream: stopped '{}'", k);
                                 } else {
                                     // Start new listener
@@ -530,6 +544,7 @@ fn run_app(
                 match listener.rx.try_recv() {
                     Ok(entries) => {
                         total_new += entries.len();
+                        app.update_rate_tracker(&listener.watching_key, &entries);
                         app.append_slot_stream_entries(&listener.watching_key, &entries);
                         // Only update main view state if this listener matches the viewed key
                         if viewed_key.as_deref() == Some(listener.watching_key.as_str()) {
@@ -700,6 +715,18 @@ fn handle_normal_input(
             if let Some(key) = app.selected_key_name() {
                 app.confirm_action = Some(format!("Delete key '{}'", key));
                 app.input_mode = InputMode::Confirm;
+            }
+        }
+
+        KeyCode::Char('i') => {
+            if app.is_viewing_stream() {
+                if let Some(k) = app.selected_key_name().map(|s| s.to_string()) {
+                    if app.listening_keys.contains(&k) {
+                        app.rate_view = !app.rate_view;
+                    } else {
+                        app.status_message = "Rate view: start listening first ([l])".to_string();
+                    }
+                }
             }
         }
 

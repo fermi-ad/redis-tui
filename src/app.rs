@@ -3,6 +3,7 @@ use crate::redis_client::{KeyInfo, MultiRedisClient, RedisValue, StreamEntry};
 use ratatui::style::Color;
 use ratatui::widgets::ListState;
 use rustfft::{FftPlanner, num_complex::Complex};
+use std::collections::{HashMap, VecDeque};
 use std::sync::mpsc;
 
 /// Maximum number of keys that can be plotted simultaneously
@@ -31,6 +32,24 @@ pub struct PlotSlot {
     pub endianness: Endianness,
     pub y_min: Option<f64>,  // None = auto
     pub y_max: Option<f64>,  // None = auto
+}
+
+/// Windows used for the multi-average display (value view + rate chart header)
+pub const RATE_WINDOWS: &[(u64, &str)] = &[(1, "1s"), (5, "5s"), (10, "10s"), (20, "20s"), (30, "30s")];
+
+/// Tracks ingestion rate and gaps for a single stream key being listened to
+#[derive(Clone, Default)]
+pub struct RateTracker {
+    /// unix_ms timestamps of received entries within the averaging window
+    pub entry_timestamps: VecDeque<u64>,
+    /// (unix_ms, rate) samples for chart display, pruned to history window
+    pub rate_history: VecDeque<(u64, f64)>,
+    /// unix_ms timestamps where gaps were detected (possible trimmed entries)
+    pub gaps: Vec<u64>,
+    /// Last received entry's unix_ms timestamp (from entry ID)
+    pub last_entry_ms: Option<u64>,
+    /// Total entries counted since tracking started
+    pub total_entries: u64,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -95,6 +114,19 @@ pub const WAVE_TYPES: &[&str] = &["sine", "square", "sawtooth", "triangle"];
 
 /// Default number of data points to show in auto-range plot mode
 pub const PLOT_WINDOW: usize = 2000;
+
+impl RateTracker {
+    /// Count entries with ID timestamps within the last `window_secs` seconds,
+    /// expressed relative to `now_ms`. Returns entries/second.
+    pub fn rate_for_window(&self, window_secs: u64, now_ms: u64) -> f64 {
+        if window_secs == 0 {
+            return 0.0;
+        }
+        let cutoff = now_ms.saturating_sub(window_secs * 1000);
+        let count = self.entry_timestamps.iter().filter(|&&ts| ts >= cutoff).count();
+        count as f64 / window_secs as f64
+    }
+}
 
 pub struct App {
     pub running: bool,
@@ -201,6 +233,12 @@ pub struct App {
     pub signal_gen_focus: usize,
     pub signal_gen_wave_idx: usize,
     pub signal_gen_dtype_idx: usize,
+
+    // Ingestion rate tracking
+    pub rate_view: bool,
+    pub rate_history_secs: u64,
+    pub rate_avg_window_secs: u64,
+    pub rate_trackers: HashMap<String, RateTracker>,
 }
 
 impl App {
@@ -294,6 +332,11 @@ impl App {
             signal_gen_focus: 0,
             signal_gen_wave_idx: 0,
             signal_gen_dtype_idx: 7, // float32 index in DataType::all()
+
+            rate_view: false,
+            rate_history_secs: 1200, // 20 minutes default (overridden by CLI)
+            rate_avg_window_secs: 60,
+            rate_trackers: HashMap::new(),
         }
     }
 
@@ -406,6 +449,94 @@ impl App {
                 }
             }
         }
+    }
+
+    /// Update the ingestion rate tracker for a stream key with newly received entries.
+    /// Called from the main loop drain for every active StreamListener.
+    pub fn update_rate_tracker(&mut self, key_name: &str, new_entries: &[StreamEntry]) {
+        let history_secs = self.rate_history_secs;
+
+        // Parse unix_ms from entry IDs (format: "{unix_ms}-{seq}")
+        let new_ms: Vec<u64> = new_entries
+            .iter()
+            .filter_map(|e| e.id.split('-').next()?.parse::<u64>().ok())
+            .collect();
+
+        if new_ms.is_empty() {
+            return;
+        }
+
+        let tracker = self.rate_trackers.entry(key_name.to_string()).or_default();
+
+        // Gap detection: compare first new entry's timestamp to last seen timestamp.
+        // A jump larger than 1.85x the expected inter-arrival interval suggests
+        // entries were written and trimmed before we could read them.
+        // Use 30s window for the reference rate — stable enough to avoid false positives.
+        if let Some(last_ms) = tracker.last_entry_ms {
+            let first_new_ms = new_ms[0];
+            if first_new_ms > last_ms {
+                let gap_ms = first_new_ms - last_ms;
+
+                let now_for_gap = first_new_ms; // approximate: compare relative to arrival
+                let cutoff_30s = now_for_gap.saturating_sub(30_000);
+                let count_30s = tracker.entry_timestamps.iter().filter(|&&ts| ts >= cutoff_30s).count();
+                let current_rate = if count_30s > 0 { count_30s as f64 / 30.0 } else { 0.0 };
+
+                let threshold_ms = if current_rate > 0.0 {
+                    ((1000.0 / current_rate) * 1.85).max(500.0) as u64
+                } else {
+                    500
+                };
+
+                if gap_ms > threshold_ms {
+                    tracker.gaps.push(first_new_ms);
+                }
+            }
+        }
+
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as u64;
+
+        // Keep 60s of timestamps — enough to compute all multi-window averages (1s..30s)
+        // and to use the stable 30s window for gap detection.
+        for ms in &new_ms {
+            tracker.entry_timestamps.push_back(*ms);
+        }
+        let timestamps_cutoff_ms = now_ms.saturating_sub(60 * 1000);
+        while let Some(&front) = tracker.entry_timestamps.front() {
+            if front < timestamps_cutoff_ms {
+                tracker.entry_timestamps.pop_front();
+            } else {
+                break;
+            }
+        }
+
+        // Chart rate: sliding window controlled by --rate-avg-window (default 2s)
+        let chart_window = self.rate_avg_window_secs.max(1);
+        let chart_cutoff_ms = now_ms.saturating_sub(chart_window * 1000);
+        let chart_count = tracker.entry_timestamps.iter().filter(|&&ts| ts >= chart_cutoff_ms).count();
+        let chart_rate = chart_count as f64 / chart_window as f64;
+        tracker.rate_history.push_back((now_ms, chart_rate));
+
+        // Prune chart history outside the rolling display window
+        let history_cutoff_ms = now_ms.saturating_sub(history_secs * 1000);
+        while let Some(&(ts, _)) = tracker.rate_history.front() {
+            if ts < history_cutoff_ms {
+                tracker.rate_history.pop_front();
+            } else {
+                break;
+            }
+        }
+
+        tracker.last_entry_ms = new_ms.last().copied();
+        tracker.total_entries += new_entries.len() as u64;
+    }
+
+    /// Remove the rate tracker for a key (called when listener stops).
+    pub fn clear_rate_tracker(&mut self, key_name: &str) {
+        self.rate_trackers.remove(key_name);
     }
 
     pub fn refresh_keys(&mut self, client: &mut MultiRedisClient) {

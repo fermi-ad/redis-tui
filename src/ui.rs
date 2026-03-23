@@ -1,4 +1,4 @@
-use crate::app::{App, EditOperation, InputMode, Panel, PlotFocus, KEY_TYPES, WAVE_TYPES};
+use crate::app::{App, EditOperation, InputMode, Panel, PlotFocus, RateTracker, RATE_WINDOWS, KEY_TYPES, WAVE_TYPES};
 use crate::data::DataType;
 use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
@@ -83,7 +83,7 @@ fn draw_body(frame: &mut Frame, app: &mut App, area: Rect) {
             ])
             .split(area);
 
-        // Top row: key list | value view side by side
+        // Top row: key list | value/rate view side by side
         let h_split = Layout::default()
             .direction(Direction::Horizontal)
             .constraints([
@@ -93,7 +93,11 @@ fn draw_body(frame: &mut Frame, app: &mut App, area: Rect) {
             .split(v_split[0]);
 
         draw_key_list(frame, app, h_split[0]);
-        draw_value_view(frame, app, h_split[1]);
+        if app.rate_view {
+            draw_rate_view(frame, app, h_split[1]);
+        } else {
+            draw_value_view(frame, app, h_split[1]);
+        }
 
         // Bottom: full-width data plot
         draw_data_plot(frame, app, v_split[1]);
@@ -108,7 +112,11 @@ fn draw_body(frame: &mut Frame, app: &mut App, area: Rect) {
             .split(area);
 
         draw_key_list(frame, app, h_split[0]);
-        draw_value_view(frame, app, h_split[1]);
+        if app.rate_view {
+            draw_rate_view(frame, app, h_split[1]);
+        } else {
+            draw_value_view(frame, app, h_split[1]);
+        }
     }
 }
 
@@ -240,6 +248,41 @@ fn draw_value_view(frame: &mut Frame, app: &mut App, area: Rect) {
         )));
     }
 
+    // Ingestion rate summary — shown for stream keys being actively listened to
+    if let Some(key) = app.selected_key_name() {
+        let is_stream = app.current_key_info.as_ref().map(|i| i.key_type == "stream").unwrap_or(false);
+        if is_stream && app.listening_keys.iter().any(|k| k == key) {
+            if let Some(tracker) = app.rate_trackers.get(key) {
+                if !tracker.rate_history.is_empty() {
+                    let now_ms = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_millis() as u64;
+                    let label_style = Style::default().fg(Color::Yellow);
+                    let val_style = Style::default().fg(Color::Cyan);
+                    let dim = Style::default().fg(Color::DarkGray);
+                    let gap_count = tracker.gaps.len();
+                    let mut spans = vec![Span::styled("Rate: ", label_style)];
+                    for (window_label, rate) in RATE_WINDOWS
+                        .iter()
+                        .map(|(secs, label)| (*label, tracker.rate_for_window(*secs, now_ms)))
+                    {
+                        spans.push(Span::styled(format!("{}:", window_label), dim));
+                        spans.push(Span::styled(format!("{:.1}  ", rate), val_style));
+                    }
+                    spans.push(Span::styled("/s", dim));
+                    if gap_count > 0 {
+                        spans.push(Span::styled(
+                            format!("  ⚠ {} gap{}", gap_count, if gap_count == 1 { "" } else { "s" }),
+                            Style::default().fg(Color::Red),
+                        ));
+                    }
+                    lines.push(Line::from(spans));
+                }
+            }
+        }
+    }
+
     // Value content
     let value_lines = app.format_value();
     for line in &value_lines {
@@ -264,6 +307,175 @@ fn draw_value_view(frame: &mut Frame, app: &mut App, area: Rect) {
         .scroll((app.value_scroll, 0));
 
     frame.render_widget(paragraph, area);
+}
+
+fn draw_rate_view(frame: &mut Frame, app: &App, area: Rect) {
+    let border_color = if app.active_panel == Panel::ValueView {
+        BORDER_ACTIVE
+    } else {
+        BORDER_INACTIVE
+    };
+
+    let key_name = app.selected_key_name().map(|s| s.to_string());
+
+    let has_data = key_name.as_ref()
+        .and_then(|k| app.rate_trackers.get(k))
+        .map(|t| !t.rate_history.is_empty())
+        .unwrap_or(false);
+
+    if !has_data {
+        let msg = match &key_name {
+            Some(k) if app.listening_keys.contains(k) => "Listening... waiting for first entries",
+            _ => "Start listening with [l] to track ingestion rate",
+        };
+        frame.render_widget(
+            Paragraph::new(msg)
+                .style(Style::default().fg(Color::DarkGray))
+                .block(
+                    Block::default()
+                        .borders(Borders::ALL)
+                        .border_style(Style::default().fg(border_color))
+                        .title(" Ingestion Rate [i] "),
+                ),
+            area,
+        );
+        return;
+    }
+
+    let key = key_name.unwrap();
+    let tracker: &RateTracker = app.rate_trackers.get(&key).unwrap();
+
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64;
+
+    let history_window_secs = app.rate_history_secs as f64;
+
+    // Multi-window averages for the header (1s, 5s, 10s, 20s, 30s)
+    let window_rates: Vec<(&str, f64)> = RATE_WINDOWS
+        .iter()
+        .map(|(secs, label)| (*label, tracker.rate_for_window(*secs, now_ms)))
+        .collect();
+
+    let current_2s = tracker.rate_history.back().map(|(_, r)| *r).unwrap_or(0.0);
+    let gap_count = tracker.gaps.len();
+    let total = tracker.total_entries;
+
+    // Build header: "1s:12.3  5s:11.8  10s:11.5  20s:11.3  30s:11.2 /s | 1234 entries | 2 gaps"
+    let avg_str: String = window_rates
+        .iter()
+        .map(|(label, rate)| format!("{}: {:.1}", label, rate))
+        .collect::<Vec<_>>()
+        .join("  ");
+    let gap_label = if gap_count > 0 {
+        format!("  | {} gap{}", gap_count, if gap_count == 1 { "" } else { "s" })
+    } else {
+        String::new()
+    };
+    let chart_window = app.rate_avg_window_secs.max(1);
+    let title = format!(
+        " Ingestion Rate [i] — {} /s  |  {} entries{}  (chart: {}s avg) ",
+        avg_str, total, gap_label, chart_window
+    );
+
+    // Chart: 2s-window rate history; X = relative seconds (0=oldest, window=now)
+    let rate_points: Vec<(f64, f64)> = tracker
+        .rate_history
+        .iter()
+        .map(|(ts, rate)| {
+            let secs_ago = (now_ms.saturating_sub(*ts)) as f64 / 1000.0;
+            let x = (history_window_secs - secs_ago).max(0.0);
+            (x, *rate)
+        })
+        .collect();
+
+    let y_max = rate_points
+        .iter()
+        .map(|(_, y)| *y)
+        .fold(current_2s.max(0.1), f64::max)
+        * 1.1;
+
+    // Gap markers: column of dots at each gap's X position
+    let gap_points: Vec<(f64, f64)> = tracker
+        .gaps
+        .iter()
+        .filter_map(|&gap_ms| {
+            let secs_ago = (now_ms.saturating_sub(gap_ms)) as f64 / 1000.0;
+            let x = history_window_secs - secs_ago;
+            if x >= 0.0 { Some(x) } else { None }
+        })
+        .flat_map(|x| (0u32..=10).map(move |i| (x, y_max * i as f64 / 10.0)))
+        .collect();
+
+    let x_left_label = if history_window_secs >= 60.0 {
+        format!("-{}min", (history_window_secs / 60.0) as u64)
+    } else {
+        format!("-{}s", history_window_secs as u64)
+    };
+
+    let mut datasets = vec![
+        Dataset::default()
+            .name(format!("entries/s ({}s avg)", chart_window))
+            .marker(safe_marker(area))
+            .graph_type(GraphType::Line)
+            .style(Style::default().fg(Color::Cyan))
+            .data(&rate_points),
+    ];
+    if !gap_points.is_empty() {
+        datasets.push(
+            Dataset::default()
+                .name("gap (possible trim)")
+                .marker(symbols::Marker::Dot)
+                .graph_type(GraphType::Scatter)
+                .style(Style::default().fg(Color::Red))
+                .data(&gap_points),
+        );
+    }
+
+    // X axis: 5 evenly spaced time labels (oldest → now)
+    let x_labels: Vec<Span> = (0..5)
+        .map(|i| {
+            let secs_ago = history_window_secs * (4 - i) as f64 / 4.0;
+            let label = if secs_ago == 0.0 {
+                "now".to_string()
+            } else if secs_ago >= 60.0 {
+                let m = (secs_ago / 60.0) as u64;
+                let s = secs_ago as u64 % 60;
+                if s == 0 { format!("-{}m", m) } else { format!("-{}m{:02}s", m, s) }
+            } else {
+                format!("-{}s", secs_ago as u64)
+            };
+            Span::styled(label, Style::default().fg(Color::DarkGray))
+        })
+        .collect();
+
+    // Y axis: 5 evenly spaced rate labels (0 → y_max)
+    let y_labels: Vec<Span> = (0..5)
+        .map(|i| {
+            let val = y_max * i as f64 / 4.0;
+            Span::styled(format!("{:.1}", val), Style::default().fg(Color::DarkGray))
+        })
+        .collect();
+
+    let x_axis = Axis::default()
+        .bounds([0.0, history_window_secs])
+        .labels(x_labels);
+    let y_axis = Axis::default()
+        .bounds([0.0, y_max])
+        .labels(y_labels);
+
+    let chart = Chart::new(datasets)
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(border_color))
+                .title(title),
+        )
+        .x_axis(x_axis)
+        .y_axis(y_axis);
+
+    frame.render_widget(chart, area);
 }
 
 fn draw_data_plot(frame: &mut Frame, app: &mut App, area: Rect) {
@@ -941,6 +1153,11 @@ fn draw_help_popup(frame: &mut Frame, app: &App, area: Rect) {
             Span::styled("  l        ", key_style),
             Span::raw("Toggle live stream listener (up to 4 keys)"),
         ]),
+        Line::from(vec![
+            Span::styled("  i        ", key_style),
+            Span::raw("Toggle ingestion rate view (stream + listening only)"),
+        ]),
+        Line::from(Span::styled("            Shows entries/s chart with gap detection", dim)),
         Line::from(vec![
             Span::styled("  w        ", key_style),
             Span::raw("Toggle signal generator (sine/square/saw/tri)"),
