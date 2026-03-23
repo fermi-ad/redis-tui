@@ -71,14 +71,32 @@ The main thread owns all `App` state and renders UI. Background threads communic
 `RateTracker` (in `app.rs`) is stored per stream key in `App.rate_trackers: HashMap<String, RateTracker>`. It is populated by `update_rate_tracker()` called from the main loop drain for every active `StreamListener`.
 
 - **`entry_timestamps`**: ring buffer of entry ID unix_ms timestamps, always pruned to 60s. Used to compute multi-window averages at render time via `rate_for_window(window_secs, now_ms)`.
-- **`rate_history`**: `(unix_ms, rate)` samples for the chart, computed using `--rate-avg-window` (default 2s) sliding window. Pruned to `--rate-history` (default 20 min).
+- **`rate_history`**: `(unix_ms, rate)` samples for the chart, computed using `--rate-avg-window` (default 2s) sliding window. Pruned to `--rate-history` (default 20 min). Recording is delayed by one full avg-window after listener start to avoid warmup transients skewing the minimum.
 - **`gaps`**: unix_ms timestamps where a jump of >1.85× the expected inter-arrival interval was detected — indicates entries may have been written and trimmed before XREAD could read them.
+- **`five_num`**: cached `Option<[f64; 5]>` five-number summary [min, Q1, median, Q3, max] of all `rate_history` values. Recomputed at most once per second. `None` during the warmup period.
+- **`tracking_start_ms`**: `Option<u64>` set on first call to `update_rate_tracker`. Used to compute the warmup countdown shown in the value view stats line.
 
-Key `i` toggles `app.rate_view`, which replaces the right panel with `draw_rate_view()`. Rate tracker is cleared (`clear_rate_tracker`) when a listener stops. The rate summary line in the value view is injected by `draw_value_view()` for any stream key with an active listener and rate data.
+Key `i` toggles `app.rate_view`, which replaces the right panel with `draw_rate_view()`. Rate tracker is cleared (`clear_rate_tracker`) when a listener stops. The rate and stats lines in the value view are always shown for any actively-listened stream key; during warmup the stats line shows a live countdown until data is available.
 
 **CLI flags:**
 - `--rate-history <minutes>` — rolling chart window (default 20)
 - `--rate-avg-window <seconds>` — sliding window for the plotted chart line (default 2)
+
+**Value view layout (listening stream):**
+```
+Rate:  1s:X  5s:X  10s:X  20s:X  30s:X  /s   [⚠ N gaps]
+Stats: Min:X  Q1:X  Med:X  Q3:X  Max:X  /s    (or: warming up — Xs until data available)
+(N older entries hidden)
+```
+
+**Rate view layout:**
+```
+┌─ Ingestion Rate [i]  |  N entries  (chart: 2s avg) ──┐
+│ Avg: 1s:X  5s:X  10s:X  20s:X  30s:X  /s            │
+│ Stats: Min:X  Q1:X  Med:X  Q3:X  Max:X  /s           │
+│ [chart — 2s rolling rate over --rate-history window]  │
+└───────────────────────────────────────────────────────┘
+```
 
 ### Per-Key Data Types
 
