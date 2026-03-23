@@ -263,13 +263,11 @@ fn draw_value_view(frame: &mut Frame, app: &mut App, area: Rect) {
                 let gap_count = tracker.gaps.len();
 
                 // Rate line — always visible when listening
+                let rate_w = tracker.rate_display_width;
                 let mut spans = vec![Span::styled("Rate: ", label_style)];
-                for (window_label, rate) in RATE_WINDOWS
-                    .iter()
-                    .map(|(secs, label)| (*label, tracker.rate_for_window(*secs, now_ms)))
-                {
+                for (i, (_, window_label)) in RATE_WINDOWS.iter().enumerate() {
                     spans.push(Span::styled(format!("{}:", window_label), dim));
-                    spans.push(Span::styled(format!("{:.1}  ", rate), val_style));
+                    spans.push(Span::styled(format!("{:>1$.1}  ", tracker.rate_display_vals[i], rate_w), val_style));
                 }
                 spans.push(Span::styled("/s", dim));
                 if gap_count > 0 {
@@ -282,14 +280,16 @@ fn draw_value_view(frame: &mut Frame, app: &mut App, area: Rect) {
 
                 // Stats line — always visible; shows countdown during warmup
                 match tracker.five_num {
-                    Some([min, q1, med, q3, max]) => {
+                    Some(_) => {
+                        let stat_w = tracker.stat_display_width;
+                        let [min, q1, med, q3, max] = tracker.stat_display_vals;
                         lines.push(Line::from(vec![
                             Span::styled("Stats: ", label_style),
-                            Span::styled("Min:", dim), Span::styled(format!("{:.1}  ", min), val_style),
-                            Span::styled("Q1:", dim),  Span::styled(format!("{:.1}  ", q1), val_style),
-                            Span::styled("Med:", dim), Span::styled(format!("{:.1}  ", med), val_style),
-                            Span::styled("Q3:", dim),  Span::styled(format!("{:.1}  ", q3), val_style),
-                            Span::styled("Max:", dim), Span::styled(format!("{:.1}", max), val_style),
+                            Span::styled("Min:", dim), Span::styled(format!("{:>1$.1}  ", min, stat_w), val_style),
+                            Span::styled("Q1:", dim),  Span::styled(format!("{:>1$.1}  ", q1,  stat_w), val_style),
+                            Span::styled("Med:", dim), Span::styled(format!("{:>1$.1}  ", med, stat_w), val_style),
+                            Span::styled("Q3:", dim),  Span::styled(format!("{:>1$.1}  ", q3,  stat_w), val_style),
+                            Span::styled("Max:", dim), Span::styled(format!("{:>1$.1}", max, stat_w), val_style),
                             Span::styled("  /s", dim),
                         ]));
                     }
@@ -384,12 +384,6 @@ fn draw_rate_view(frame: &mut Frame, app: &App, area: Rect) {
 
     let history_window_secs = app.rate_history_secs as f64;
 
-    // Multi-window averages for the header (1s, 5s, 10s, 20s, 30s)
-    let window_rates: Vec<(&str, f64)> = RATE_WINDOWS
-        .iter()
-        .map(|(secs, label)| (*label, tracker.rate_for_window(*secs, now_ms)))
-        .collect();
-
     let current_2s = tracker.rate_history.back().map(|(_, r)| *r).unwrap_or(0.0);
     let gap_count = tracker.gaps.len();
     let total = tracker.total_entries;
@@ -424,25 +418,27 @@ fn draw_rate_view(frame: &mut Frame, app: &App, area: Rect) {
     // --- Averages line ---
     let dim = Style::default().fg(Color::DarkGray);
     let val_style = Style::default().fg(Color::Cyan);
+    let rate_w = tracker.rate_display_width;
     let mut avg_spans = vec![Span::styled("Avg: ", dim)];
-    for (label, rate) in &window_rates {
+    for (i, (_, label)) in RATE_WINDOWS.iter().enumerate() {
         avg_spans.push(Span::styled(format!("{}:", label), dim));
-        avg_spans.push(Span::styled(format!("{:.1}  ", rate), val_style));
+        avg_spans.push(Span::styled(format!("{:>1$.1}  ", tracker.rate_display_vals[i], rate_w), val_style));
     }
     avg_spans.push(Span::styled("/s", dim));
 
     // --- Five-number summary line (if available) ---
     let header_lines = if has_summary {
-        let [min, q1, med, q3, max] = tracker.five_num.unwrap();
+        let [min, q1, med, q3, max] = tracker.stat_display_vals;
+        let stat_w = tracker.stat_display_width;
         vec![
             Line::from(avg_spans),
             Line::from(vec![
                 Span::styled("Stats: ", dim),
-                Span::styled("Min:", dim), Span::styled(format!("{:.1}  ", min), val_style),
-                Span::styled("Q1:", dim),  Span::styled(format!("{:.1}  ", q1), val_style),
-                Span::styled("Med:", dim), Span::styled(format!("{:.1}  ", med), val_style),
-                Span::styled("Q3:", dim),  Span::styled(format!("{:.1}  ", q3), val_style),
-                Span::styled("Max:", dim), Span::styled(format!("{:.1}", max), val_style),
+                Span::styled("Min:", dim), Span::styled(format!("{:>1$.1}  ", min, stat_w), val_style),
+                Span::styled("Q1:", dim),  Span::styled(format!("{:>1$.1}  ", q1,  stat_w), val_style),
+                Span::styled("Med:", dim), Span::styled(format!("{:>1$.1}  ", med, stat_w), val_style),
+                Span::styled("Q3:", dim),  Span::styled(format!("{:>1$.1}  ", q3,  stat_w), val_style),
+                Span::styled("Max:", dim), Span::styled(format!("{:>1$.1}", max, stat_w), val_style),
                 Span::styled("  /s", dim),
             ]),
         ]

@@ -37,8 +37,17 @@ pub struct PlotSlot {
 /// Windows used for the multi-average display (value view + rate chart header)
 pub const RATE_WINDOWS: &[(u64, &str)] = &[(1, "1s"), (5, "5s"), (10, "10s"), (20, "20s"), (30, "30s")];
 
+/// How long (ms) a display width stays pinned after it would otherwise shrink
+const RATE_WIDTH_HYSTERESIS_MS: u64 = 3_000;
+/// Fractional dead band for displayed values — only update display when value moves by this fraction
+const RATE_VAL_DEAD_BAND: f64 = 0.04; // 4%
+/// Minimum absolute change required to update displayed value (handles near-zero rates)
+const RATE_VAL_DEAD_BAND_MIN: f64 = 0.1;
+/// Max time (ms) before a displayed value is forced to refresh even if inside the dead band
+const RATE_VAL_STALENESS_MS: u64 = 2_000;
+
 /// Tracks ingestion rate and gaps for a single stream key being listened to
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub struct RateTracker {
     /// unix_ms timestamps of received entries within the averaging window
     pub entry_timestamps: VecDeque<u64>,
@@ -56,6 +65,45 @@ pub struct RateTracker {
     pub five_num: Option<[f64; 5]>,
     /// unix_ms when five_num was last computed (updated at most once per second)
     pub last_five_num_ms: u64,
+    /// Sticky minimum display width for rate values (chars), with hysteresis
+    pub rate_display_width: usize,
+    /// unix_ms after which rate_display_width may shrink
+    pub rate_display_width_until_ms: u64,
+    /// Sticky minimum display width for five-number summary values (chars), with hysteresis
+    pub stat_display_width: usize,
+    /// unix_ms after which stat_display_width may shrink
+    pub stat_display_width_until_ms: u64,
+    /// Displayed rate values per window (dead-band stabilised), index matches RATE_WINDOWS
+    pub rate_display_vals: [f64; 5],
+    /// unix_ms after which each rate display value must refresh regardless of dead band
+    pub rate_display_vals_until_ms: [u64; 5],
+    /// Displayed five-number summary values (dead-band stabilised): [min, q1, med, q3, max]
+    pub stat_display_vals: [f64; 5],
+    /// unix_ms after which each stat display value must refresh regardless of dead band
+    pub stat_display_vals_until_ms: [u64; 5],
+}
+
+impl Default for RateTracker {
+    fn default() -> Self {
+        Self {
+            entry_timestamps: VecDeque::new(),
+            rate_history: VecDeque::new(),
+            gaps: Vec::new(),
+            last_entry_ms: None,
+            total_entries: 0,
+            tracking_start_ms: None,
+            five_num: None,
+            last_five_num_ms: 0,
+            rate_display_width: 3,
+            rate_display_width_until_ms: 0,
+            stat_display_width: 3,
+            stat_display_width_until_ms: 0,
+            rate_display_vals: [0.0; 5],
+            rate_display_vals_until_ms: [0; 5],
+            stat_display_vals: [0.0; 5],
+            stat_display_vals_until_ms: [0; 5],
+        }
+    }
 }
 
 /// Compute the five-number summary [min, q1, median, q3, max] from rate_history.
@@ -153,6 +201,27 @@ impl RateTracker {
         let cutoff = now_ms.saturating_sub(window_secs * 1000);
         let count = self.entry_timestamps.iter().filter(|&&ts| ts >= cutoff).count();
         count as f64 / window_secs as f64
+    }
+
+    /// Update a sticky display width: grows immediately, shrinks only after RATE_WIDTH_HYSTERESIS_MS.
+    fn update_sticky_width(pinned: &mut usize, pinned_until_ms: &mut u64, needed: usize, now_ms: u64) {
+        if needed > *pinned {
+            *pinned = needed;
+            *pinned_until_ms = now_ms + RATE_WIDTH_HYSTERESIS_MS;
+        } else if now_ms >= *pinned_until_ms {
+            *pinned = needed;
+        }
+    }
+
+    /// Update a sticky displayed value with a dead band: only updates when the new value
+    /// moves outside a ±RATE_VAL_DEAD_BAND fraction of the current display value, or when
+    /// the staleness timeout expires (so gradual drift still shows through).
+    fn update_sticky_val(current: &mut f64, until_ms: &mut u64, new_val: f64, now_ms: u64) {
+        let dead_band = (current.abs() * RATE_VAL_DEAD_BAND).max(RATE_VAL_DEAD_BAND_MIN);
+        if (new_val - *current).abs() > dead_band || now_ms >= *until_ms {
+            *current = new_val;
+            *until_ms = now_ms + RATE_VAL_STALENESS_MS;
+        }
     }
 }
 
@@ -570,6 +639,42 @@ impl App {
         if now_ms.saturating_sub(tracker.last_five_num_ms) >= 1000 {
             tracker.five_num = compute_five_num(&tracker.rate_history);
             tracker.last_five_num_ms = now_ms;
+        }
+
+        // Update sticky display values and widths
+        for (i, (secs, _)) in RATE_WINDOWS.iter().enumerate() {
+            let rate = tracker.rate_for_window(*secs, now_ms);
+            RateTracker::update_sticky_val(
+                &mut tracker.rate_display_vals[i],
+                &mut tracker.rate_display_vals_until_ms[i],
+                rate,
+                now_ms,
+            );
+        }
+        let rate_needed = tracker.rate_display_vals.iter().map(|r| format!("{:.1}", r).len()).max().unwrap_or(3);
+        RateTracker::update_sticky_width(
+            &mut tracker.rate_display_width,
+            &mut tracker.rate_display_width_until_ms,
+            rate_needed,
+            now_ms,
+        );
+
+        if let Some(vals) = tracker.five_num {
+            for (i, v) in vals.iter().enumerate() {
+                RateTracker::update_sticky_val(
+                    &mut tracker.stat_display_vals[i],
+                    &mut tracker.stat_display_vals_until_ms[i],
+                    *v,
+                    now_ms,
+                );
+            }
+            let stat_needed = tracker.stat_display_vals.iter().map(|v| format!("{:.1}", v).len()).max().unwrap_or(3);
+            RateTracker::update_sticky_width(
+                &mut tracker.stat_display_width,
+                &mut tracker.stat_display_width_until_ms,
+                stat_needed,
+                now_ms,
+            );
         }
     }
 
