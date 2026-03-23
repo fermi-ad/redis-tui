@@ -5,7 +5,7 @@ edition = "2021"
 description = "A Redis TUI client inspired by Redis Insight"
 
 [dependencies]
-ratatui = "0.29"
+ratatui = "0.30.0"
 crossterm = "0.28"
 redis = "1.0"
 clap = { version = "4", features = ["derive"] }
