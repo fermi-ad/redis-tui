@@ -1,0 +1,16 @@
+{
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash .claude/add_instrumentation_reviewers.sh",
+            "statusMessage": "Adding instrumentation team as reviewers..."
+          }
+        ]
+      }
+    ]
+  }
+}
