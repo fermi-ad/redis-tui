@@ -50,6 +50,34 @@ pub struct RateTracker {
     pub last_entry_ms: Option<u64>,
     /// Total entries counted since tracking started
     pub total_entries: u64,
+    /// unix_ms when tracking began — used to skip warmup samples
+    pub tracking_start_ms: Option<u64>,
+    /// Cached five-number summary [min, q1, median, q3, max] of rate_history values
+    pub five_num: Option<[f64; 5]>,
+    /// unix_ms when five_num was last computed (updated at most once per second)
+    pub last_five_num_ms: u64,
+}
+
+/// Compute the five-number summary [min, q1, median, q3, max] from rate_history.
+/// Uses linear interpolation for quartiles (same as numpy's default).
+fn compute_five_num(rate_history: &VecDeque<(u64, f64)>) -> Option<[f64; 5]> {
+    if rate_history.is_empty() {
+        return None;
+    }
+    let mut vals: Vec<f64> = rate_history.iter().map(|(_, r)| *r).collect();
+    vals.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let n = vals.len();
+    let percentile = |p: f64| -> f64 {
+        if n == 1 {
+            return vals[0];
+        }
+        let idx = p * (n - 1) as f64;
+        let lo = idx.floor() as usize;
+        let hi = (idx.ceil() as usize).min(n - 1);
+        let frac = idx - lo as f64;
+        vals[lo] * (1.0 - frac) + vals[hi] * frac
+    };
+    Some([vals[0], percentile(0.25), percentile(0.5), percentile(0.75), vals[n - 1]])
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -513,12 +541,19 @@ impl App {
             }
         }
 
+        // Record tracking start time on first call
+        let start_ms = *tracker.tracking_start_ms.get_or_insert(now_ms);
+
         // Chart rate: sliding window controlled by --rate-avg-window (default 2s)
         let chart_window = self.rate_avg_window_secs.max(1);
         let chart_cutoff_ms = now_ms.saturating_sub(chart_window * 1000);
         let chart_count = tracker.entry_timestamps.iter().filter(|&&ts| ts >= chart_cutoff_ms).count();
         let chart_rate = chart_count as f64 / chart_window as f64;
-        tracker.rate_history.push_back((now_ms, chart_rate));
+
+        // Only record once the window is full — avoids low warmup samples skewing the minimum
+        if now_ms.saturating_sub(start_ms) >= chart_window * 1000 {
+            tracker.rate_history.push_back((now_ms, chart_rate));
+        }
 
         // Prune chart history outside the rolling display window
         let history_cutoff_ms = now_ms.saturating_sub(history_secs * 1000);
@@ -532,6 +567,12 @@ impl App {
 
         tracker.last_entry_ms = new_ms.last().copied();
         tracker.total_entries += new_entries.len() as u64;
+
+        // Recompute five-number summary at most once per second
+        if now_ms.saturating_sub(tracker.last_five_num_ms) >= 1000 {
+            tracker.five_num = compute_five_num(&tracker.rate_history);
+            tracker.last_five_num_ms = now_ms;
+        }
     }
 
     /// Remove the rate tracker for a key (called when listener stops).

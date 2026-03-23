@@ -253,31 +253,63 @@ fn draw_value_view(frame: &mut Frame, app: &mut App, area: Rect) {
         let is_stream = app.current_key_info.as_ref().map(|i| i.key_type == "stream").unwrap_or(false);
         if is_stream && app.listening_keys.iter().any(|k| k == key) {
             if let Some(tracker) = app.rate_trackers.get(key) {
-                if !tracker.rate_history.is_empty() {
-                    let now_ms = std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .unwrap_or_default()
-                        .as_millis() as u64;
-                    let label_style = Style::default().fg(Color::Yellow);
-                    let val_style = Style::default().fg(Color::Cyan);
-                    let dim = Style::default().fg(Color::DarkGray);
-                    let gap_count = tracker.gaps.len();
-                    let mut spans = vec![Span::styled("Rate: ", label_style)];
-                    for (window_label, rate) in RATE_WINDOWS
-                        .iter()
-                        .map(|(secs, label)| (*label, tracker.rate_for_window(*secs, now_ms)))
-                    {
-                        spans.push(Span::styled(format!("{}:", window_label), dim));
-                        spans.push(Span::styled(format!("{:.1}  ", rate), val_style));
+                let now_ms = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_millis() as u64;
+                let label_style = Style::default().fg(Color::Yellow);
+                let val_style = Style::default().fg(Color::Cyan);
+                let dim = Style::default().fg(Color::DarkGray);
+                let gap_count = tracker.gaps.len();
+
+                // Rate line — always visible when listening
+                let mut spans = vec![Span::styled("Rate: ", label_style)];
+                for (window_label, rate) in RATE_WINDOWS
+                    .iter()
+                    .map(|(secs, label)| (*label, tracker.rate_for_window(*secs, now_ms)))
+                {
+                    spans.push(Span::styled(format!("{}:", window_label), dim));
+                    spans.push(Span::styled(format!("{:.1}  ", rate), val_style));
+                }
+                spans.push(Span::styled("/s", dim));
+                if gap_count > 0 {
+                    spans.push(Span::styled(
+                        format!("  ⚠ {} gap{}", gap_count, if gap_count == 1 { "" } else { "s" }),
+                        Style::default().fg(Color::Red),
+                    ));
+                }
+                lines.push(Line::from(spans));
+
+                // Stats line — always visible; shows countdown during warmup
+                match tracker.five_num {
+                    Some([min, q1, med, q3, max]) => {
+                        lines.push(Line::from(vec![
+                            Span::styled("Stats: ", label_style),
+                            Span::styled("Min:", dim), Span::styled(format!("{:.1}  ", min), val_style),
+                            Span::styled("Q1:", dim),  Span::styled(format!("{:.1}  ", q1), val_style),
+                            Span::styled("Med:", dim), Span::styled(format!("{:.1}  ", med), val_style),
+                            Span::styled("Q3:", dim),  Span::styled(format!("{:.1}  ", q3), val_style),
+                            Span::styled("Max:", dim), Span::styled(format!("{:.1}", max), val_style),
+                            Span::styled("  /s", dim),
+                        ]));
                     }
-                    spans.push(Span::styled("/s", dim));
-                    if gap_count > 0 {
-                        spans.push(Span::styled(
-                            format!("  ⚠ {} gap{}", gap_count, if gap_count == 1 { "" } else { "s" }),
-                            Style::default().fg(Color::Red),
-                        ));
+                    None => {
+                        let chart_window = app.rate_avg_window_secs.max(1);
+                        let remaining_secs = match tracker.tracking_start_ms {
+                            Some(start_ms) => {
+                                let warmup_end_ms = start_ms + chart_window * 1000;
+                                ((warmup_end_ms.saturating_sub(now_ms)) + 999) / 1000
+                            }
+                            None => chart_window,
+                        };
+                        lines.push(Line::from(vec![
+                            Span::styled("Stats: ", label_style),
+                            Span::styled(
+                                format!("warming up — {}s until data available", remaining_secs),
+                                Style::default().fg(Color::Yellow),
+                            ),
+                        ]));
                     }
-                    lines.push(Line::from(spans));
                 }
             }
         }
@@ -374,12 +406,60 @@ fn draw_rate_view(frame: &mut Frame, app: &App, area: Rect) {
         String::new()
     };
     let chart_window = app.rate_avg_window_secs.max(1);
-    let title = format!(
-        " Ingestion Rate [i] — {} /s  |  {} entries{}  (chart: {}s avg) ",
-        avg_str, total, gap_label, chart_window
+    let block_title = format!(
+        " Ingestion Rate [i]  |  {} entries{}  (chart: {}s avg) ",
+        total, gap_label, chart_window
     );
 
-    // Chart: 2s-window rate history; X = relative seconds (0=oldest, window=now)
+    // Render the outer block (border + title) and split its inner area
+    let outer_block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(border_color))
+        .title(block_title);
+    let inner = outer_block.inner(area);
+    frame.render_widget(outer_block, area);
+
+    // Reserve rows for averages line + summary line, give the rest to the chart
+    let has_summary = tracker.five_num.is_some();
+    let header_rows = if has_summary { 2 } else { 1 };
+    let v_split = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(header_rows), Constraint::Min(0)])
+        .split(inner);
+
+    // --- Averages line ---
+    let dim = Style::default().fg(Color::DarkGray);
+    let val_style = Style::default().fg(Color::Cyan);
+    let mut avg_spans = vec![Span::styled("Avg: ", dim)];
+    for (label, rate) in &window_rates {
+        avg_spans.push(Span::styled(format!("{}:", label), dim));
+        avg_spans.push(Span::styled(format!("{:.1}  ", rate), val_style));
+    }
+    avg_spans.push(Span::styled("/s", dim));
+
+    // --- Five-number summary line (if available) ---
+    let header_lines = if has_summary {
+        let [min, q1, med, q3, max] = tracker.five_num.unwrap();
+        vec![
+            Line::from(avg_spans),
+            Line::from(vec![
+                Span::styled("Stats: ", dim),
+                Span::styled("Min:", dim), Span::styled(format!("{:.1}  ", min), val_style),
+                Span::styled("Q1:", dim),  Span::styled(format!("{:.1}  ", q1), val_style),
+                Span::styled("Med:", dim), Span::styled(format!("{:.1}  ", med), val_style),
+                Span::styled("Q3:", dim),  Span::styled(format!("{:.1}  ", q3), val_style),
+                Span::styled("Max:", dim), Span::styled(format!("{:.1}", max), val_style),
+                Span::styled("  /s", dim),
+            ]),
+        ]
+    } else {
+        vec![Line::from(avg_spans)]
+    };
+    frame.render_widget(Paragraph::new(header_lines), v_split[0]);
+
+    // --- Chart (no block — outer block already drew the border) ---
+    let chart_area = v_split[1];
+
     let rate_points: Vec<(f64, f64)> = tracker
         .rate_history
         .iter()
@@ -396,7 +476,6 @@ fn draw_rate_view(frame: &mut Frame, app: &App, area: Rect) {
         .fold(current_2s.max(0.1), f64::max)
         * 1.1;
 
-    // Gap markers: column of dots at each gap's X position
     let gap_points: Vec<(f64, f64)> = tracker
         .gaps
         .iter()
@@ -408,16 +487,10 @@ fn draw_rate_view(frame: &mut Frame, app: &App, area: Rect) {
         .flat_map(|x| (0u32..=10).map(move |i| (x, y_max * i as f64 / 10.0)))
         .collect();
 
-    let x_left_label = if history_window_secs >= 60.0 {
-        format!("-{}min", (history_window_secs / 60.0) as u64)
-    } else {
-        format!("-{}s", history_window_secs as u64)
-    };
-
     let mut datasets = vec![
         Dataset::default()
             .name(format!("entries/s ({}s avg)", chart_window))
-            .marker(safe_marker(area))
+            .marker(safe_marker(chart_area))
             .graph_type(GraphType::Line)
             .style(Style::default().fg(Color::Cyan))
             .data(&rate_points),
@@ -433,7 +506,6 @@ fn draw_rate_view(frame: &mut Frame, app: &App, area: Rect) {
         );
     }
 
-    // X axis: 5 evenly spaced time labels (oldest → now)
     let x_labels: Vec<Span> = (0..5)
         .map(|i| {
             let secs_ago = history_window_secs * (4 - i) as f64 / 4.0;
@@ -450,7 +522,6 @@ fn draw_rate_view(frame: &mut Frame, app: &App, area: Rect) {
         })
         .collect();
 
-    // Y axis: 5 evenly spaced rate labels (0 → y_max)
     let y_labels: Vec<Span> = (0..5)
         .map(|i| {
             let val = y_max * i as f64 / 4.0;
@@ -458,24 +529,11 @@ fn draw_rate_view(frame: &mut Frame, app: &App, area: Rect) {
         })
         .collect();
 
-    let x_axis = Axis::default()
-        .bounds([0.0, history_window_secs])
-        .labels(x_labels);
-    let y_axis = Axis::default()
-        .bounds([0.0, y_max])
-        .labels(y_labels);
+    let x_axis = Axis::default().bounds([0.0, history_window_secs]).labels(x_labels);
+    let y_axis = Axis::default().bounds([0.0, y_max]).labels(y_labels);
 
-    let chart = Chart::new(datasets)
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .border_style(Style::default().fg(border_color))
-                .title(title),
-        )
-        .x_axis(x_axis)
-        .y_axis(y_axis);
-
-    frame.render_widget(chart, area);
+    let chart = Chart::new(datasets).x_axis(x_axis).y_axis(y_axis);
+    frame.render_widget(chart, chart_area);
 }
 
 fn draw_data_plot(frame: &mut Frame, app: &mut App, area: Rect) {
