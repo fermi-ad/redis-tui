@@ -32,10 +32,10 @@ docker run -it --rm --network host redis-tui
 Four source modules in `src/`, single binary:
 
 - **`main.rs`** — CLI parsing, terminal setup/teardown (raw mode, mouse capture, bracketed paste), event loop (50ms tick), background thread lifecycle (`StreamListener`, `SignalGenerator`), input routing by `InputMode`, mouse event handling (click-to-select, scroll per-pane, shift-bypass)
-- **`app.rs`** — All application state (`App` struct), Redis data loading, plot/FFT computation, edit operations, multi-key slot management with per-key data types
+- **`app.rs`** — All application state (`App` struct), Redis data loading, plot/FFT computation, edit operations, multi-key slot management with per-key data types, ingestion rate tracking (`RateTracker`)
 - **`data.rs`** — Binary data encoding/decoding (`DataType` × `Endianness` → `Vec<f64>`), hex formatting, value parsing. `is_binary()` only checks for control chars — do NOT use it to gate binary display for `_`-prefixed stream fields or when a numeric DataType is selected
 - **`redis_client.rs`** — `RedisClient` (single host) and `MultiRedisClient` (aggregated multi-host with collision detection), all Redis commands
-- **`ui.rs`** — ratatui rendering: layout (key list / value view / data plot), charts (signal + FFT), popups (filter, edit, help, confirm, signal gen, plot settings), crosshair drawing, per-key Y-axis labels and hover values
+- **`ui.rs`** — ratatui rendering: layout (key list / value view / data plot), charts (signal + FFT + ingestion rate), popups (filter, edit, help, confirm, signal gen, plot settings), crosshair drawing, per-key Y-axis labels and hover values
 
 ### Data Flow
 
@@ -43,6 +43,7 @@ Four source modules in `src/`, single binary:
 Redis → MultiRedisClient → App state → ui::draw()
                               ↑
          StreamListener ──────┘ (mpsc channel, bounded drain 20/tick)
+                          also drives RateTracker per key (update_rate_tracker)
          SignalGenerator ──────→ Redis (XADD + XTRIM 100)
          FFT thread ───────────→ App.fft_rx (mpsc, polled via try_recv)
 ```
@@ -63,6 +64,21 @@ The main thread owns all `App` state and renders UI. Background threads communic
 | `MAX_PLOT_SLOTS` | 4 | Simultaneous plotted keys |
 | `MAX_STREAM_ENTRIES` | 10 | In-memory stream entries (only last 5 displayed, last entry plotted) |
 | `PLOT_WINDOW` | 2,000 | Auto-range visible data points |
+| `RATE_WINDOWS` | `[(1,"1s"),(5,"5s"),(10,"10s"),(20,"20s"),(30,"30s")]` | Multi-window averages shown in rate view header and value view |
+
+### Ingestion Rate Tracking
+
+`RateTracker` (in `app.rs`) is stored per stream key in `App.rate_trackers: HashMap<String, RateTracker>`. It is populated by `update_rate_tracker()` called from the main loop drain for every active `StreamListener`.
+
+- **`entry_timestamps`**: ring buffer of entry ID unix_ms timestamps, always pruned to 60s. Used to compute multi-window averages at render time via `rate_for_window(window_secs, now_ms)`.
+- **`rate_history`**: `(unix_ms, rate)` samples for the chart, computed using `--rate-avg-window` (default 2s) sliding window. Pruned to `--rate-history` (default 20 min).
+- **`gaps`**: unix_ms timestamps where a jump of >1.85× the expected inter-arrival interval was detected — indicates entries may have been written and trimmed before XREAD could read them.
+
+Key `i` toggles `app.rate_view`, which replaces the right panel with `draw_rate_view()`. Rate tracker is cleared (`clear_rate_tracker`) when a listener stops. The rate summary line in the value view is injected by `draw_value_view()` for any stream key with an active listener and rate data.
+
+**CLI flags:**
+- `--rate-history <minutes>` — rolling chart window (default 20)
+- `--rate-avg-window <seconds>` — sliding window for the plotted chart line (default 2)
 
 ### Per-Key Data Types
 
