@@ -11,9 +11,10 @@
 7. [Data Plotting](#data-plotting)
 8. [FFT Analysis](#fft-analysis)
 9. [Stream Monitoring](#stream-monitoring)
-10. [Signal Generator](#signal-generator)
-11. [Mouse Controls](#mouse-controls)
-12. [Multi-Host Mode](#multi-host-mode)
+10. [Ingestion Rate Monitoring](#ingestion-rate-monitoring)
+11. [Signal Generator](#signal-generator)
+12. [Mouse Controls](#mouse-controls)
+13. [Multi-Host Mode](#multi-host-mode)
 
 ---
 
@@ -31,6 +32,8 @@ redis-tui [OPTIONS]
 | `-d, --db <DB>` | Redis database number | `0` |
 | `-u, --url <URL>` | Full Redis URL (overrides host/port/password/db) | None |
 | `--hosts-file <PATH>` | Path to hosts file for multi-host mode | None |
+| `--rate-history <MINUTES>` | Rolling window for the ingestion rate chart | `20` |
+| `--rate-avg-window <SECONDS>` | Sliding average window for the plotted rate line | `2` |
 
 ### Examples
 
@@ -295,6 +298,53 @@ When a listener is active:
 - Stream entries in memory are capped at 10,000 per key to prevent OOM
 
 Press `l` again on the same key to stop its listener.
+
+---
+
+## Ingestion Rate Monitoring
+
+While a stream listener is active, redis-tui tracks how many entries arrive per second and displays this in two places.
+
+### Rate and Stats Lines (Value View)
+
+When listening to a stream key, two lines are injected at the top of the value view:
+
+```
+Rate:  1s:X  5s:X  10s:X  20s:X  30s:X  /s   [⚠ N gaps]
+Stats: Min:X  Q1:X  Med:X  Q3:X  Max:X  /s
+```
+
+- **Rate line**: rolling averages over 1, 5, 10, 20, and 30 second windows. A gap warning (`⚠ N gaps`) appears if timestamp jumps suggest entries were written and trimmed before XREAD could read them.
+- **Stats line**: five-number summary (min, Q1, median, Q3, max) of the rate history. During the initial warmup period a countdown is shown instead: `warming up — Xs until data available`.
+
+### Rate View
+
+| Key | Action |
+|-----|--------|
+| `i` | Toggle ingestion rate view (stream key + active listener required) |
+
+Press `i` to replace the right panel with a full rate chart:
+
+```
+┌─ Ingestion Rate [i]  |  N entries  (chart: 2s avg) ──┐
+│ Avg: 1s:X  5s:X  10s:X  20s:X  30s:X  /s            │
+│ Stats: Min:X  Q1:X  Med:X  Q3:X  Max:X  /s           │
+│ [chart — rolling rate over --rate-history window]     │
+└───────────────────────────────────────────────────────┘
+```
+
+- The chart plots entries/sec as a rolling line using the `--rate-avg-window` sliding average.
+- Red markers on the chart indicate detected gaps where the arrival interval jumped by more than 1.85× the expected rate, suggesting entries were trimmed before being read.
+- The chart window is controlled by `--rate-history` (default 20 minutes).
+
+Press `i` again to return to the normal value view.
+
+### CLI Flags
+
+| Flag | Description | Default |
+|------|-------------|---------|
+| `--rate-history <MINUTES>` | How far back the rate chart shows (rolling window) | `20` |
+| `--rate-avg-window <SECONDS>` | Sliding window used to compute the plotted rate line | `2` |
 
 ---
 

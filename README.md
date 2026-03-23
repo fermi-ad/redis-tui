@@ -12,7 +12,7 @@ A terminal UI client for Redis inspired by Redis Insight, built with Rust and [r
 - Binary data visualization with configurable data types and endianness
 - Multi-key plotting — overlay up to 4 keys on the same chart with individual Y-axis scales
 - FFT analysis with per-key traces (linear/log scale)
-- Live stream listening on up to 4 keys simultaneously
+- Live stream listening on up to 4 keys simultaneously with ingestion rate monitoring (rolling averages, five-number summary, gap detection)
 - Up to 4 concurrent signal generators for writing waveform data to streams
 - Mouse support for plot interaction (drag to pan, scroll to zoom)
 - Multi-host support — connect to multiple Redis instances and aggregate keys
@@ -81,6 +81,7 @@ redis-tui --hosts-file hosts.txt
 | `r` | Refresh keys |
 | `p` | Toggle key in plot |
 | `l` | Toggle stream listener |
+| `i` | Toggle ingestion rate view |
 | `w` | Toggle signal generator |
 | `f` | Toggle FFT |
 | `s` | Edit value |
