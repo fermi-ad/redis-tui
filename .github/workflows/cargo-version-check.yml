@@ -5,6 +5,15 @@ on:
     paths:
       - '**/*.rs'
       - 'Cargo.toml'
+  push:
+    paths:
+      - '**/*.rs'
+      - 'Cargo.toml'
+  workflow_dispatch:
+    inputs:
+      base_ref:
+        description: 'Base branch to compare against'
+        default: 'main'
 
 jobs:
   check:
@@ -15,10 +24,21 @@ jobs:
         with:
           fetch-depth: 0
 
+      - name: Resolve base SHA
+        id: base
+        run: |
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            echo "sha=${{ github.event.pull_request.base.sha }}" >> $GITHUB_OUTPUT
+          elif [ "${{ github.event_name }}" = "push" ]; then
+            echo "sha=${{ github.event.before }}" >> $GITHUB_OUTPUT
+          else
+            echo "sha=$(git rev-parse origin/${{ inputs.base_ref || 'main' }})" >> $GITHUB_OUTPUT
+          fi
+
       - name: Detect changes
         id: diff
         run: |
-          CHANGED_FILES=$(git diff --name-only ${{ github.event.pull_request.base.sha }})
+          CHANGED_FILES=$(git diff --name-only ${{ steps.base.outputs.sha }})
 
           echo "CHANGED_FILES<<EOF" >> $GITHUB_OUTPUT
           echo "$CHANGED_FILES" >> $GITHUB_OUTPUT
@@ -41,7 +61,7 @@ jobs:
           fi
 
           # Compare version values
-          OLD_VERSION=$(git show ${{ github.event.pull_request.base.sha }}:Cargo.toml | grep '^version' | head -1)
+          OLD_VERSION=$(git show ${{ steps.base.outputs.sha }}:Cargo.toml | grep '^version' | head -1)
           NEW_VERSION=$(grep '^version' Cargo.toml | head -1)
 
           if [ "$OLD_VERSION" = "$NEW_VERSION" ]; then
