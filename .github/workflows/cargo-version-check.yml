@@ -30,7 +30,7 @@ jobs:
           if [ "${{ github.event_name }}" = "pull_request" ]; then
             echo "sha=${{ github.event.pull_request.base.sha }}" >> $GITHUB_OUTPUT
           elif [ "${{ github.event_name }}" = "push" ]; then
-            echo "sha=${{ github.event.before }}" >> $GITHUB_OUTPUT
+            echo "sha=$(git rev-parse origin/main)" >> $GITHUB_OUTPUT
           else
             echo "sha=$(git rev-parse origin/${{ inputs.base_ref || 'main' }})" >> $GITHUB_OUTPUT
           fi
