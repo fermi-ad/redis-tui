@@ -18,8 +18,7 @@ jobs:
       - name: Detect changes
         id: diff
         run: |
-          git fetch origin ${{ github.base_ref }}
-          CHANGED_FILES=$(git diff --name-only origin/${{ github.base_ref }})
+          CHANGED_FILES=$(git diff --name-only ${{ github.event.pull_request.base.sha }})
 
           echo "CHANGED_FILES<<EOF" >> $GITHUB_OUTPUT
           echo "$CHANGED_FILES" >> $GITHUB_OUTPUT
@@ -42,7 +41,7 @@ jobs:
           fi
 
           # Compare version values
-          OLD_VERSION=$(git show origin/${{ github.base_ref }}:Cargo.toml | grep '^version' | head -1)
+          OLD_VERSION=$(git show ${{ github.event.pull_request.base.sha }}:Cargo.toml | grep '^version' | head -1)
           NEW_VERSION=$(grep '^version' Cargo.toml | head -1)
 
           if [ "$OLD_VERSION" = "$NEW_VERSION" ]; then
