@@ -3,6 +3,7 @@ use crate::redis_client::{KeyInfo, MultiRedisClient, RedisValue, StreamEntry};
 use ratatui::style::Color;
 use ratatui::widgets::ListState;
 use rustfft::{FftPlanner, num_complex::Complex};
+use std::collections::{HashMap, VecDeque};
 use std::sync::mpsc;
 
 /// Maximum number of keys that can be plotted simultaneously
@@ -31,6 +32,100 @@ pub struct PlotSlot {
     pub endianness: Endianness,
     pub y_min: Option<f64>,  // None = auto
     pub y_max: Option<f64>,  // None = auto
+}
+
+/// Windows used for the multi-average display (value view + rate chart header)
+pub const RATE_WINDOWS: &[(u64, &str)] = &[(1, "1s"), (5, "5s"), (10, "10s"), (20, "20s"), (30, "30s")];
+
+/// How long (ms) a display width stays pinned after it would otherwise shrink
+const RATE_WIDTH_HYSTERESIS_MS: u64 = 3_000;
+/// Fractional dead band for displayed values — only update display when value moves by this fraction
+const RATE_VAL_DEAD_BAND: f64 = 0.04; // 4%
+/// Minimum absolute change required to update displayed value (handles near-zero rates)
+const RATE_VAL_DEAD_BAND_MIN: f64 = 0.1;
+/// Max time (ms) before a displayed value is forced to refresh even if inside the dead band
+const RATE_VAL_STALENESS_MS: u64 = 2_000;
+
+/// Tracks ingestion rate and gaps for a single stream key being listened to
+#[derive(Clone)]
+pub struct RateTracker {
+    /// unix_ms timestamps of received entries within the averaging window
+    pub entry_timestamps: VecDeque<u64>,
+    /// (unix_ms, rate) samples for chart display, pruned to history window
+    pub rate_history: VecDeque<(u64, f64)>,
+    /// unix_ms timestamps where gaps were detected (possible trimmed entries)
+    pub gaps: Vec<u64>,
+    /// Last received entry's unix_ms timestamp (from entry ID)
+    pub last_entry_ms: Option<u64>,
+    /// Total entries counted since tracking started
+    pub total_entries: u64,
+    /// unix_ms when tracking began — used to skip warmup samples
+    pub tracking_start_ms: Option<u64>,
+    /// Cached five-number summary [min, q1, median, q3, max] of rate_history values
+    pub five_num: Option<[f64; 5]>,
+    /// unix_ms when five_num was last computed (updated at most once per second)
+    pub last_five_num_ms: u64,
+    /// Sticky minimum display width for rate values (chars), with hysteresis
+    pub rate_display_width: usize,
+    /// unix_ms after which rate_display_width may shrink
+    pub rate_display_width_until_ms: u64,
+    /// Sticky minimum display width for five-number summary values (chars), with hysteresis
+    pub stat_display_width: usize,
+    /// unix_ms after which stat_display_width may shrink
+    pub stat_display_width_until_ms: u64,
+    /// Displayed rate values per window (dead-band stabilised), index matches RATE_WINDOWS
+    pub rate_display_vals: [f64; 5],
+    /// unix_ms after which each rate display value must refresh regardless of dead band
+    pub rate_display_vals_until_ms: [u64; 5],
+    /// Displayed five-number summary values (dead-band stabilised): [min, q1, med, q3, max]
+    pub stat_display_vals: [f64; 5],
+    /// unix_ms after which each stat display value must refresh regardless of dead band
+    pub stat_display_vals_until_ms: [u64; 5],
+}
+
+impl Default for RateTracker {
+    fn default() -> Self {
+        Self {
+            entry_timestamps: VecDeque::new(),
+            rate_history: VecDeque::new(),
+            gaps: Vec::new(),
+            last_entry_ms: None,
+            total_entries: 0,
+            tracking_start_ms: None,
+            five_num: None,
+            last_five_num_ms: 0,
+            rate_display_width: 3,
+            rate_display_width_until_ms: 0,
+            stat_display_width: 3,
+            stat_display_width_until_ms: 0,
+            rate_display_vals: [0.0; 5],
+            rate_display_vals_until_ms: [0; 5],
+            stat_display_vals: [0.0; 5],
+            stat_display_vals_until_ms: [0; 5],
+        }
+    }
+}
+
+/// Compute the five-number summary [min, q1, median, q3, max] from rate_history.
+/// Uses linear interpolation for quartiles (same as numpy's default).
+fn compute_five_num(rate_history: &VecDeque<(u64, f64)>) -> Option<[f64; 5]> {
+    if rate_history.is_empty() {
+        return None;
+    }
+    let mut vals: Vec<f64> = rate_history.iter().map(|(_, r)| *r).collect();
+    vals.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let n = vals.len();
+    let percentile = |p: f64| -> f64 {
+        if n == 1 {
+            return vals[0];
+        }
+        let idx = p * (n - 1) as f64;
+        let lo = idx.floor() as usize;
+        let hi = (idx.ceil() as usize).min(n - 1);
+        let frac = idx - lo as f64;
+        vals[lo] * (1.0 - frac) + vals[hi] * frac
+    };
+    Some([vals[0], percentile(0.25), percentile(0.5), percentile(0.75), vals[n - 1]])
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -95,6 +190,40 @@ pub const WAVE_TYPES: &[&str] = &["sine", "square", "sawtooth", "triangle"];
 
 /// Default number of data points to show in auto-range plot mode
 pub const PLOT_WINDOW: usize = 2000;
+
+impl RateTracker {
+    /// Count entries with ID timestamps within the last `window_secs` seconds,
+    /// expressed relative to `now_ms`. Returns entries/second.
+    pub fn rate_for_window(&self, window_secs: u64, now_ms: u64) -> f64 {
+        if window_secs == 0 {
+            return 0.0;
+        }
+        let cutoff = now_ms.saturating_sub(window_secs * 1000);
+        let count = self.entry_timestamps.iter().filter(|&&ts| ts >= cutoff).count();
+        count as f64 / window_secs as f64
+    }
+
+    /// Update a sticky display width: grows immediately, shrinks only after RATE_WIDTH_HYSTERESIS_MS.
+    fn update_sticky_width(pinned: &mut usize, pinned_until_ms: &mut u64, needed: usize, now_ms: u64) {
+        if needed > *pinned {
+            *pinned = needed;
+            *pinned_until_ms = now_ms + RATE_WIDTH_HYSTERESIS_MS;
+        } else if now_ms >= *pinned_until_ms {
+            *pinned = needed;
+        }
+    }
+
+    /// Update a sticky displayed value with a dead band: only updates when the new value
+    /// moves outside a ±RATE_VAL_DEAD_BAND fraction of the current display value, or when
+    /// the staleness timeout expires (so gradual drift still shows through).
+    fn update_sticky_val(current: &mut f64, until_ms: &mut u64, new_val: f64, now_ms: u64) {
+        let dead_band = (current.abs() * RATE_VAL_DEAD_BAND).max(RATE_VAL_DEAD_BAND_MIN);
+        if (new_val - *current).abs() > dead_band || now_ms >= *until_ms {
+            *current = new_val;
+            *until_ms = now_ms + RATE_VAL_STALENESS_MS;
+        }
+    }
+}
 
 pub struct App {
     pub running: bool,
@@ -201,6 +330,12 @@ pub struct App {
     pub signal_gen_focus: usize,
     pub signal_gen_wave_idx: usize,
     pub signal_gen_dtype_idx: usize,
+
+    // Ingestion rate tracking
+    pub rate_view: bool,
+    pub rate_history_secs: u64,
+    pub rate_avg_window_secs: u64,
+    pub rate_trackers: HashMap<String, RateTracker>,
 }
 
 impl App {
@@ -294,6 +429,11 @@ impl App {
             signal_gen_focus: 0,
             signal_gen_wave_idx: 0,
             signal_gen_dtype_idx: 7, // float32 index in DataType::all()
+
+            rate_view: false,
+            rate_history_secs: 1200, // 20 minutes default (overridden by CLI)
+            rate_avg_window_secs: 2,  // 2 seconds default (overridden by CLI)
+            rate_trackers: HashMap::new(),
         }
     }
 
@@ -406,6 +546,141 @@ impl App {
                 }
             }
         }
+    }
+
+    /// Update the ingestion rate tracker for a stream key with newly received entries.
+    /// Called from the main loop drain for every active StreamListener.
+    pub fn update_rate_tracker(&mut self, key_name: &str, new_entries: &[StreamEntry], now_ms: u64) {
+        let history_secs = self.rate_history_secs;
+
+        // Parse unix_ms from entry IDs (format: "{unix_ms}-{seq}")
+        let new_ms: Vec<u64> = new_entries
+            .iter()
+            .filter_map(|e| e.id.split('-').next()?.parse::<u64>().ok())
+            .collect();
+
+        if new_ms.is_empty() {
+            return;
+        }
+
+        let tracker = self.rate_trackers.entry(key_name.to_string()).or_default();
+
+        // Gap detection: compare first new entry's timestamp to last seen timestamp.
+        // A jump larger than 1.85x the expected inter-arrival interval suggests
+        // entries were written and trimmed before we could read them.
+        // Use 30s window for the reference rate — stable enough to avoid false positives.
+        if let Some(last_ms) = tracker.last_entry_ms {
+            let first_new_ms = new_ms[0];
+            if first_new_ms > last_ms {
+                let gap_ms = first_new_ms - last_ms;
+
+                let now_for_gap = first_new_ms; // approximate: compare relative to arrival
+                let cutoff_30s = now_for_gap.saturating_sub(30_000);
+                let count_30s = tracker.entry_timestamps.iter().filter(|&&ts| ts >= cutoff_30s).count();
+                let current_rate = if count_30s > 0 { count_30s as f64 / 30.0 } else { 0.0 };
+
+                let threshold_ms = if current_rate > 0.0 {
+                    ((1000.0 / current_rate) * 1.85).max(500.0) as u64
+                } else {
+                    500
+                };
+
+                if gap_ms > threshold_ms {
+                    tracker.gaps.push(first_new_ms);
+                }
+            }
+        }
+
+        // Keep 60s of timestamps — enough to compute all multi-window averages (1s..30s)
+        // and to use the stable 30s window for gap detection.
+        for ms in &new_ms {
+            tracker.entry_timestamps.push_back(*ms);
+        }
+        let timestamps_cutoff_ms = now_ms.saturating_sub(60 * 1000);
+        while let Some(&front) = tracker.entry_timestamps.front() {
+            if front < timestamps_cutoff_ms {
+                tracker.entry_timestamps.pop_front();
+            } else {
+                break;
+            }
+        }
+
+        // Record tracking start time on first call
+        let start_ms = *tracker.tracking_start_ms.get_or_insert(now_ms);
+
+        // Chart rate: sliding window controlled by --rate-avg-window (default 2s)
+        let chart_window = self.rate_avg_window_secs.max(1);
+        let chart_cutoff_ms = now_ms.saturating_sub(chart_window * 1000);
+        let chart_count = tracker.entry_timestamps.iter().filter(|&&ts| ts >= chart_cutoff_ms).count();
+        let chart_rate = chart_count as f64 / chart_window as f64;
+
+        // Only record once the window is full — avoids low warmup samples skewing the minimum
+        if now_ms.saturating_sub(start_ms) >= chart_window * 1000 {
+            tracker.rate_history.push_back((now_ms, chart_rate));
+        }
+
+        // Prune chart history outside the rolling display window
+        let history_cutoff_ms = now_ms.saturating_sub(history_secs * 1000);
+        while let Some(&(ts, _)) = tracker.rate_history.front() {
+            if ts < history_cutoff_ms {
+                tracker.rate_history.pop_front();
+            } else {
+                break;
+            }
+        }
+
+        // Prune gaps that are older than the history window
+        tracker.gaps.retain(|&ts| ts >= history_cutoff_ms);
+
+        tracker.last_entry_ms = new_ms.last().copied();
+        tracker.total_entries += new_entries.len() as u64;
+
+        // Recompute five-number summary at most once per second
+        if now_ms.saturating_sub(tracker.last_five_num_ms) >= 1000 {
+            tracker.five_num = compute_five_num(&tracker.rate_history);
+            tracker.last_five_num_ms = now_ms;
+        }
+
+        // Update sticky display values and widths
+        for (i, (secs, _)) in RATE_WINDOWS.iter().enumerate() {
+            let rate = tracker.rate_for_window(*secs, now_ms);
+            RateTracker::update_sticky_val(
+                &mut tracker.rate_display_vals[i],
+                &mut tracker.rate_display_vals_until_ms[i],
+                rate,
+                now_ms,
+            );
+        }
+        let rate_needed = tracker.rate_display_vals.iter().map(|r| format!("{:.1}", r).len()).max().unwrap_or(3);
+        RateTracker::update_sticky_width(
+            &mut tracker.rate_display_width,
+            &mut tracker.rate_display_width_until_ms,
+            rate_needed,
+            now_ms,
+        );
+
+        if let Some(vals) = tracker.five_num {
+            for (i, v) in vals.iter().enumerate() {
+                RateTracker::update_sticky_val(
+                    &mut tracker.stat_display_vals[i],
+                    &mut tracker.stat_display_vals_until_ms[i],
+                    *v,
+                    now_ms,
+                );
+            }
+            let stat_needed = tracker.stat_display_vals.iter().map(|v| format!("{:.1}", v).len()).max().unwrap_or(3);
+            RateTracker::update_sticky_width(
+                &mut tracker.stat_display_width,
+                &mut tracker.stat_display_width_until_ms,
+                stat_needed,
+                now_ms,
+            );
+        }
+    }
+
+    /// Remove the rate tracker for a key (called when listener stops).
+    pub fn clear_rate_tracker(&mut self, key_name: &str) {
+        self.rate_trackers.remove(key_name);
     }
 
     pub fn refresh_keys(&mut self, client: &mut MultiRedisClient) {
@@ -1933,5 +2208,159 @@ mod tests {
         assert!(joined.contains("[uint16]"), "should show uint16 label, got:\n{}", joined);
         assert!(joined.contains("256"), "should contain decoded value 256, got:\n{}", joined);
         assert!(joined.contains("512"), "should contain decoded value 512, got:\n{}", joined);
+    }
+
+    // ── RateTracker tests ──────────────────────────────────────────────────────
+
+    fn make_entry(unix_ms: u64) -> crate::redis_client::StreamEntry {
+        crate::redis_client::StreamEntry {
+            id: format!("{}-0", unix_ms),
+            fields: vec![],
+        }
+    }
+
+    #[test]
+    fn compute_five_num_empty() {
+        let empty: VecDeque<(u64, f64)> = VecDeque::new();
+        assert!(compute_five_num(&empty).is_none());
+    }
+
+    #[test]
+    fn compute_five_num_single() {
+        let mut h = VecDeque::new();
+        h.push_back((0, 5.0));
+        let result = compute_five_num(&h).unwrap();
+        assert_eq!(result, [5.0, 5.0, 5.0, 5.0, 5.0]);
+    }
+
+    #[test]
+    fn compute_five_num_known_values() {
+        // Sorted: [1, 2, 3, 4, 5] — min=1 Q1=2 med=3 Q3=4 max=5
+        let mut h = VecDeque::new();
+        for v in [3.0, 1.0, 5.0, 2.0, 4.0] {
+            h.push_back((0, v));
+        }
+        let [min, q1, med, q3, max] = compute_five_num(&h).unwrap();
+        assert_eq!(min, 1.0);
+        assert_eq!(med, 3.0);
+        assert_eq!(max, 5.0);
+        assert!((q1 - 2.0).abs() < 1e-9);
+        assert!((q3 - 4.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn rate_for_window_counts_within_window() {
+        let mut tracker = RateTracker::default();
+        let now_ms: u64 = 10_000;
+        // 5 entries at 1s intervals, all clearly within a 5s window (none at the boundary)
+        // now-4000, now-3000, now-2000, now-1000, now → cutoff = now-5000 → all 5 included
+        for i in 0..5u64 {
+            tracker.entry_timestamps.push_back(now_ms - (4 - i) * 1000);
+        }
+        let rate = tracker.rate_for_window(5, now_ms);
+        assert!((rate - 1.0).abs() < 1e-9, "expected 1.0/s, got {}", rate);
+    }
+
+    #[test]
+    fn rate_for_window_zero_window() {
+        let tracker = RateTracker::default();
+        assert_eq!(tracker.rate_for_window(0, 1000), 0.0);
+    }
+
+    #[test]
+    fn update_rate_tracker_warmup_gates_history() {
+        let mut app = App::new();
+        app.rate_avg_window_secs = 5; // 5s warmup
+
+        // now_ms = base_ms: first call sets tracking_start_ms = base_ms; 0s elapsed < 5s warmup
+        let base_ms: u64 = 1_700_000_000_000; // realistic timestamp
+        let entries: Vec<_> = (0..10).map(|i| make_entry(base_ms + i * 100)).collect();
+        app.update_rate_tracker("k", &entries, base_ms);
+
+        let tracker = app.rate_trackers.get("k").unwrap();
+        assert!(tracker.rate_history.is_empty(), "rate_history should be empty during warmup");
+        assert!(tracker.tracking_start_ms.is_some());
+    }
+
+    #[test]
+    fn update_rate_tracker_records_after_warmup() {
+        let mut app = App::new();
+        app.rate_avg_window_secs = 1; // 1s warmup
+
+        let base_ms: u64 = 1_700_000_000_000;
+        // First batch — now_ms = base_ms, sets tracking_start_ms = base_ms
+        let batch1: Vec<_> = (0..5).map(|i| make_entry(base_ms + i * 100)).collect();
+        app.update_rate_tracker("k", &batch1, base_ms);
+
+        // Second call — now_ms is 2s later, well past the 1s warmup
+        let now2 = base_ms + 2000;
+        let batch2: Vec<_> = (0..5).map(|i| make_entry(now2 + i * 100)).collect();
+        app.update_rate_tracker("k", &batch2, now2);
+
+        let tracker = app.rate_trackers.get("k").unwrap();
+        assert!(!tracker.rate_history.is_empty(), "should have recorded rate after warmup elapsed");
+    }
+
+    #[test]
+    fn update_rate_tracker_gap_detection() {
+        let mut app = App::new();
+        app.rate_avg_window_secs = 1;
+
+        let base_ms: u64 = 1_700_000_000_000;
+        // 300 entries at 100ms apart → fills the 30s reference window at ~10/s
+        // With current_rate = 10/s, threshold = (100ms * 1.85).max(500ms) = 500ms
+        let batch1: Vec<_> = (0..300).map(|i| make_entry(base_ms + i * 100)).collect();
+        app.update_rate_tracker("k", &batch1, base_ms);
+
+        // Jump of 2000ms from last entry (base+29900ms → base+31900ms)
+        // gap_ms = 2000ms > threshold 500ms → gap detected
+        let last_ms = base_ms + 299 * 100; // base + 29900
+        let gap_start = last_ms + 2000;    // base + 31900
+        let now2 = base_ms + 35_000;
+        let batch2: Vec<_> = (0..5).map(|i| make_entry(gap_start + i * 100)).collect();
+        app.update_rate_tracker("k", &batch2, now2);
+
+        let tracker = app.rate_trackers.get("k").unwrap();
+        assert_eq!(tracker.gaps.len(), 1, "should detect exactly one gap");
+        assert_eq!(tracker.gaps[0], gap_start);
+    }
+
+    #[test]
+    fn update_rate_tracker_prunes_gaps_to_history_window() {
+        let mut app = App::new();
+        app.rate_avg_window_secs = 1;
+        app.rate_history_secs = 10; // 10s history
+
+        let base_ms: u64 = 1_700_000_000_000;
+
+        // Batch 1: sets tracking start
+        let batch1: Vec<_> = (0..10).map(|i| make_entry(base_ms + i * 100)).collect();
+        app.update_rate_tracker("k", &batch1, base_ms);
+
+        // Inject an old gap that's outside the 10s history window
+        let old_gap = base_ms - 20_000; // 20s before base
+        app.rate_trackers.get_mut("k").unwrap().gaps.push(old_gap);
+        assert_eq!(app.rate_trackers["k"].gaps.len(), 1);
+
+        // now_ms = base + 15s → history_cutoff = base + 15s - 10s = base + 5s
+        // old_gap = base - 20s → old_gap < cutoff → should be pruned
+        let now2 = base_ms + 15_000;
+        let batch2: Vec<_> = (0..5).map(|i| make_entry(now2 + i * 100)).collect();
+        app.update_rate_tracker("k", &batch2, now2);
+
+        let tracker = app.rate_trackers.get("k").unwrap();
+        assert!(!tracker.gaps.contains(&old_gap), "old gap should have been pruned");
+    }
+
+    #[test]
+    fn clear_rate_tracker_removes_entry() {
+        let mut app = App::new();
+        app.rate_avg_window_secs = 1;
+        let base_ms: u64 = 1_700_000_000_000;
+        let entries: Vec<_> = (0..3).map(|i| make_entry(base_ms + i * 1000)).collect();
+        app.update_rate_tracker("k", &entries, base_ms);
+        assert!(app.rate_trackers.contains_key("k"));
+        app.clear_rate_tracker("k");
+        assert!(!app.rate_trackers.contains_key("k"));
     }
 }
