@@ -953,38 +953,41 @@ fn handle_signal_gen_input(app: &mut App, code: KeyCode) {
             }
         }
         KeyCode::Enter => {
-            let freq: f64 = match app.signal_gen_fields[0].1.trim().parse() {
-                Ok(v) if v > 0.0 => v,
+            let freq: f64 = match app.signal_gen_fields[0].1.trim().parse::<f64>() {
+                Ok(v) if v > 0.0 && v.is_finite() => v,
                 _ => {
-                    app.status_message = "Error: invalid cycles/entry".to_string();
+                    app.status_message = "Error: cycles/entry must be > 0 and finite".to_string();
                     return;
                 }
             };
-            let amp: f64 = match app.signal_gen_fields[1].1.trim().parse() {
-                Ok(v) => v,
+            let amp: f64 = match app.signal_gen_fields[1].1.trim().parse::<f64>() {
+                Ok(v) if v.is_finite() => v,
                 _ => {
-                    app.status_message = "Error: invalid amplitude".to_string();
+                    app.status_message = "Error: amplitude must be a finite number".to_string();
                     return;
                 }
             };
-            let noise: f64 = match app.signal_gen_fields[2].1.trim().parse() {
-                Ok(v) if v >= 0.0 => v,
+            let noise: f64 = match app.signal_gen_fields[2].1.trim().parse::<f64>() {
+                Ok(v) if v >= 0.0 && v.is_finite() => v,
                 _ => {
-                    app.status_message = "Error: invalid noise (>= 0)".to_string();
+                    app.status_message = "Error: noise must be >= 0 and finite".to_string();
                     return;
                 }
             };
             let samples: usize = match app.signal_gen_fields[3].1.trim().parse() {
-                Ok(v) if v > 0 => v,
+                Ok(v) if v > 0 && v <= app::MAX_SAMPLES_PER_ENTRY => v,
                 _ => {
-                    app.status_message = "Error: invalid samples/entry".to_string();
+                    app.status_message = format!(
+                        "Error: samples/entry must be 1 - {}",
+                        app::MAX_SAMPLES_PER_ENTRY
+                    );
                     return;
                 }
             };
-            let rate: f64 = match app.signal_gen_fields[4].1.trim().parse() {
-                Ok(v) if v > 0.0 => v,
+            let rate: f64 = match app.signal_gen_fields[4].1.trim().parse::<f64>() {
+                Ok(v) if v > 0.0 && v.is_finite() => v,
                 _ => {
-                    app.status_message = "Error: invalid entries/sec".to_string();
+                    app.status_message = "Error: entries/sec must be > 0 and finite".to_string();
                     return;
                 }
             };
@@ -1209,5 +1212,209 @@ fn handle_mouse_event(app: &mut App, mouse: MouseEvent) {
             }
         }
         _ => {}
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_app_with_fields(freq: &str, amp: &str, noise: &str, samples: &str, rate: &str) -> App {
+        let mut app = App::new();
+        app.start_signal_gen_popup();
+        app.signal_gen_fields[0].1 = freq.to_string();
+        app.signal_gen_fields[1].1 = amp.to_string();
+        app.signal_gen_fields[2].1 = noise.to_string();
+        app.signal_gen_fields[3].1 = samples.to_string();
+        app.signal_gen_fields[4].1 = rate.to_string();
+        app
+    }
+
+    fn submit(app: &mut App) {
+        handle_signal_gen_input(app, KeyCode::Enter);
+    }
+
+    #[test]
+    fn valid_inputs_pass_validation() {
+        let mut app = make_app_with_fields("2.0", "1.0", "0.1", "100", "10.0");
+        submit(&mut app);
+        assert_eq!(app.status_message, "Signal gen: starting");
+        assert_eq!(app.input_mode, InputMode::Normal);
+    }
+
+    // --- cycles/entry (freq) ---
+
+    #[test]
+    fn zero_freq_rejected() {
+        let mut app = make_app_with_fields("0", "1.0", "0.0", "100", "10.0");
+        submit(&mut app);
+        assert!(app.status_message.contains("cycles/entry"), "{}", app.status_message);
+        assert_eq!(app.input_mode, InputMode::SignalGen);
+    }
+
+    #[test]
+    fn negative_freq_rejected() {
+        let mut app = make_app_with_fields("-1.0", "1.0", "0.0", "100", "10.0");
+        submit(&mut app);
+        assert!(app.status_message.contains("cycles/entry"), "{}", app.status_message);
+    }
+
+    #[test]
+    fn infinite_freq_rejected() {
+        let mut app = make_app_with_fields("inf", "1.0", "0.0", "100", "10.0");
+        submit(&mut app);
+        assert!(app.status_message.contains("cycles/entry"), "{}", app.status_message);
+    }
+
+    #[test]
+    fn negative_infinite_freq_rejected() {
+        let mut app = make_app_with_fields("-inf", "1.0", "0.0", "100", "10.0");
+        submit(&mut app);
+        assert!(app.status_message.contains("cycles/entry"), "{}", app.status_message);
+    }
+
+    #[test]
+    fn nan_freq_rejected() {
+        let mut app = make_app_with_fields("NaN", "1.0", "0.0", "100", "10.0");
+        submit(&mut app);
+        assert!(app.status_message.contains("cycles/entry"), "{}", app.status_message);
+    }
+
+    // --- amplitude ---
+
+    #[test]
+    fn nan_amp_rejected() {
+        let mut app = make_app_with_fields("2.0", "NaN", "0.0", "100", "10.0");
+        submit(&mut app);
+        assert!(app.status_message.contains("amplitude"), "{}", app.status_message);
+        assert_eq!(app.input_mode, InputMode::SignalGen);
+    }
+
+    #[test]
+    fn infinite_amp_rejected() {
+        let mut app = make_app_with_fields("2.0", "inf", "0.0", "100", "10.0");
+        submit(&mut app);
+        assert!(app.status_message.contains("amplitude"), "{}", app.status_message);
+    }
+
+    #[test]
+    fn negative_infinite_amp_rejected() {
+        let mut app = make_app_with_fields("2.0", "-inf", "0.0", "100", "10.0");
+        submit(&mut app);
+        assert!(app.status_message.contains("amplitude"), "{}", app.status_message);
+    }
+
+    #[test]
+    fn zero_amp_accepted() {
+        let mut app = make_app_with_fields("2.0", "0.0", "0.0", "100", "10.0");
+        submit(&mut app);
+        assert_eq!(app.status_message, "Signal gen: starting");
+    }
+
+    #[test]
+    fn negative_amp_accepted() {
+        let mut app = make_app_with_fields("2.0", "-1.5", "0.0", "100", "10.0");
+        submit(&mut app);
+        assert_eq!(app.status_message, "Signal gen: starting");
+    }
+
+    // --- noise ---
+
+    #[test]
+    fn negative_noise_rejected() {
+        let mut app = make_app_with_fields("2.0", "1.0", "-0.1", "100", "10.0");
+        submit(&mut app);
+        assert!(app.status_message.contains("noise"), "{}", app.status_message);
+        assert_eq!(app.input_mode, InputMode::SignalGen);
+    }
+
+    #[test]
+    fn infinite_noise_rejected() {
+        let mut app = make_app_with_fields("2.0", "1.0", "inf", "100", "10.0");
+        submit(&mut app);
+        assert!(app.status_message.contains("noise"), "{}", app.status_message);
+    }
+
+    #[test]
+    fn negative_infinite_noise_rejected() {
+        let mut app = make_app_with_fields("2.0", "1.0", "-inf", "100", "10.0");
+        submit(&mut app);
+        assert!(app.status_message.contains("noise"), "{}", app.status_message);
+    }
+
+    #[test]
+    fn nan_noise_rejected() {
+        let mut app = make_app_with_fields("2.0", "1.0", "NaN", "100", "10.0");
+        submit(&mut app);
+        assert!(app.status_message.contains("noise"), "{}", app.status_message);
+    }
+
+    #[test]
+    fn zero_noise_accepted() {
+        let mut app = make_app_with_fields("2.0", "1.0", "0.0", "100", "10.0");
+        submit(&mut app);
+        assert_eq!(app.status_message, "Signal gen: starting");
+    }
+
+    // --- samples/entry ---
+
+    #[test]
+    fn zero_samples_rejected() {
+        let mut app = make_app_with_fields("2.0", "1.0", "0.0", "0", "10.0");
+        submit(&mut app);
+        assert!(app.status_message.contains("samples/entry"), "{}", app.status_message);
+        assert_eq!(app.input_mode, InputMode::SignalGen);
+    }
+
+    #[test]
+    fn oversized_samples_rejected() {
+        let mut app = make_app_with_fields("2.0", "1.0", "0.0", "1000001", "10.0");
+        submit(&mut app);
+        assert!(app.status_message.contains("samples/entry"), "{}", app.status_message);
+    }
+
+    #[test]
+    fn max_allowed_samples_accepted() {
+        let mut app = make_app_with_fields("2.0", "1.0", "0.0", "1000000", "10.0");
+        submit(&mut app);
+        assert_eq!(app.status_message, "Signal gen: starting");
+    }
+
+    // --- entries/sec (rate) ---
+
+    #[test]
+    fn zero_rate_rejected() {
+        let mut app = make_app_with_fields("2.0", "1.0", "0.0", "100", "0");
+        submit(&mut app);
+        assert!(app.status_message.contains("entries/sec"), "{}", app.status_message);
+        assert_eq!(app.input_mode, InputMode::SignalGen);
+    }
+
+    #[test]
+    fn negative_rate_rejected() {
+        let mut app = make_app_with_fields("2.0", "1.0", "0.0", "100", "-1.0");
+        submit(&mut app);
+        assert!(app.status_message.contains("entries/sec"), "{}", app.status_message);
+    }
+
+    #[test]
+    fn infinite_rate_rejected() {
+        let mut app = make_app_with_fields("2.0", "1.0", "0.0", "100", "inf");
+        submit(&mut app);
+        assert!(app.status_message.contains("entries/sec"), "{}", app.status_message);
+    }
+
+    #[test]
+    fn negative_infinite_rate_rejected() {
+        let mut app = make_app_with_fields("2.0", "1.0", "0.0", "100", "-inf");
+        submit(&mut app);
+        assert!(app.status_message.contains("entries/sec"), "{}", app.status_message);
+    }
+
+    #[test]
+    fn nan_rate_rejected() {
+        let mut app = make_app_with_fields("2.0", "1.0", "0.0", "100", "NaN");
+        submit(&mut app);
+        assert!(app.status_message.contains("entries/sec"), "{}", app.status_message);
     }
 }
