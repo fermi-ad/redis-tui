@@ -1,0 +1,54 @@
+name: Build and Push Docker Image
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+env:
+  REGISTRY: adregistry.fnal.gov
+  IMAGE: adregistry.fnal.gov/instrumentation/redis-tui
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+    env:
+      HARBOR_USERNAME: ${{ secrets.HARBOR_USERNAME }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Read version from Cargo.toml
+        id: version
+        run: |
+          VERSION=$(grep -m1 '^version' Cargo.toml | sed 's/version = "\(.*\)"/\1/')
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Log in to Harbor
+        if: env.HARBOR_USERNAME != ''
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ secrets.HARBOR_USERNAME }}
+          password: ${{ secrets.HARBOR_PASSWORD }}
+
+      - name: Set image tags
+        id: tags
+        run: |
+          VERSION=${{ steps.version.outputs.version }}
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ] || [ -n "$ACT" ]; then
+            BRANCH=$(echo "${{ github.ref_name }}" | sed 's|/|-|g')
+            echo "tags=${{ env.IMAGE }}:latest-${BRANCH},${{ env.IMAGE }}:${VERSION}-${BRANCH}" >> "$GITHUB_OUTPUT"
+          else
+            echo "tags=${{ env.IMAGE }}:latest,${{ env.IMAGE }}:${VERSION}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          platforms: linux/amd64
+          tags: ${{ steps.tags.outputs.tags }}
