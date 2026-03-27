@@ -1,0 +1,53 @@
+name: Require Cargo version bump
+
+on:
+  pull_request:
+    paths:
+      - '**/*.rs'
+      - 'Cargo.toml'
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Detect changes
+        id: diff
+        run: |
+          git fetch origin ${{ github.base_ref }}
+          CHANGED_FILES=$(git diff --name-only origin/${{ github.base_ref }})
+
+          echo "CHANGED_FILES<<EOF" >> $GITHUB_OUTPUT
+          echo "$CHANGED_FILES" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+
+      - name: Enforce version bump
+        run: |
+          CHANGED="${{ steps.diff.outputs.CHANGED_FILES }}"
+
+          # Sanity check: only enforce if Rust files actually changed
+          if ! echo "$CHANGED" | grep -q "\.rs"; then
+            echo "No Rust changes detected"
+            exit 0
+          fi
+
+          # Require Cargo.toml to be modified
+          if ! echo "$CHANGED" | grep -q "Cargo.toml"; then
+            echo "Rust files changed but Cargo.toml not updated"
+            exit 1
+          fi
+
+          # Compare version values
+          OLD_VERSION=$(git show origin/${{ github.base_ref }}:Cargo.toml | grep '^version' | head -1)
+          NEW_VERSION=$(grep '^version' Cargo.toml | head -1)
+
+          if [ "$OLD_VERSION" = "$NEW_VERSION" ]; then
+            echo "Cargo.toml version not bumped"
+            exit 1
+          fi
+
+          echo "Version bump detected"
