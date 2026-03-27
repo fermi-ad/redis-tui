@@ -3,6 +3,7 @@ name = "redis-tui"
 version = "1.3.0"
 edition = "2021"
 description = "A Redis TUI client inspired by Redis Insight"
+license = "BSD-3-Clause"
 
 [dependencies]
 ratatui = "0.30.0"
