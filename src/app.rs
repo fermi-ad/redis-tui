@@ -188,6 +188,9 @@ pub enum PlotFocus {
 pub const KEY_TYPES: &[&str] = &["string", "hash", "list", "set", "zset", "stream"];
 pub const WAVE_TYPES: &[&str] = &["sine", "square", "sawtooth", "triangle"];
 
+/// Maximum samples per stream entry in signal generator
+pub const MAX_SAMPLES_PER_ENTRY: usize = 1_000_000;
+
 /// Default number of data points to show in auto-range plot mode
 pub const PLOT_WINDOW: usize = 2000;
 

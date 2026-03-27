@@ -975,9 +975,12 @@ fn handle_signal_gen_input(app: &mut App, code: KeyCode) {
                 }
             };
             let samples: usize = match app.signal_gen_fields[3].1.trim().parse() {
-                Ok(v) if v > 0 && v <= 1_000_000 => v,
+                Ok(v) if v > 0 && v <= app::MAX_SAMPLES_PER_ENTRY => v,
                 _ => {
-                    app.status_message = "Error: samples/entry must be 1 - 1,000,000".to_string();
+                    app.status_message = format!(
+                        "Error: samples/entry must be 1 - {}",
+                        app::MAX_SAMPLES_PER_ENTRY
+                    );
                     return;
                 }
             };
@@ -1232,7 +1235,7 @@ mod tests {
     }
 
     #[test]
-    fn valid_inputs_start_generator() {
+    fn valid_inputs_pass_validation() {
         let mut app = make_app_with_fields("2.0", "1.0", "0.1", "100", "10.0");
         submit(&mut app);
         assert_eq!(app.status_message, "Signal gen: starting");
@@ -1259,6 +1262,13 @@ mod tests {
     #[test]
     fn infinite_freq_rejected() {
         let mut app = make_app_with_fields("inf", "1.0", "0.0", "100", "10.0");
+        submit(&mut app);
+        assert!(app.status_message.contains("cycles/entry"), "{}", app.status_message);
+    }
+
+    #[test]
+    fn negative_infinite_freq_rejected() {
+        let mut app = make_app_with_fields("-inf", "1.0", "0.0", "100", "10.0");
         submit(&mut app);
         assert!(app.status_message.contains("cycles/entry"), "{}", app.status_message);
     }
@@ -1326,6 +1336,20 @@ mod tests {
     }
 
     #[test]
+    fn negative_infinite_noise_rejected() {
+        let mut app = make_app_with_fields("2.0", "1.0", "-inf", "100", "10.0");
+        submit(&mut app);
+        assert!(app.status_message.contains("noise"), "{}", app.status_message);
+    }
+
+    #[test]
+    fn nan_noise_rejected() {
+        let mut app = make_app_with_fields("2.0", "1.0", "NaN", "100", "10.0");
+        submit(&mut app);
+        assert!(app.status_message.contains("noise"), "{}", app.status_message);
+    }
+
+    #[test]
     fn zero_noise_accepted() {
         let mut app = make_app_with_fields("2.0", "1.0", "0.0", "100", "10.0");
         submit(&mut app);
@@ -1376,6 +1400,20 @@ mod tests {
     #[test]
     fn infinite_rate_rejected() {
         let mut app = make_app_with_fields("2.0", "1.0", "0.0", "100", "inf");
+        submit(&mut app);
+        assert!(app.status_message.contains("entries/sec"), "{}", app.status_message);
+    }
+
+    #[test]
+    fn negative_infinite_rate_rejected() {
+        let mut app = make_app_with_fields("2.0", "1.0", "0.0", "100", "-inf");
+        submit(&mut app);
+        assert!(app.status_message.contains("entries/sec"), "{}", app.status_message);
+    }
+
+    #[test]
+    fn nan_rate_rejected() {
+        let mut app = make_app_with_fields("2.0", "1.0", "0.0", "100", "NaN");
         submit(&mut app);
         assert!(app.status_message.contains("entries/sec"), "{}", app.status_message);
     }
