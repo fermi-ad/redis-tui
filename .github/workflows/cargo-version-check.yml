@@ -1,0 +1,72 @@
+name: Require Cargo version bump
+
+on:
+  pull_request:
+    paths:
+      - '**/*.rs'
+      - 'Cargo.toml'
+  push:
+    paths:
+      - '**/*.rs'
+      - 'Cargo.toml'
+  workflow_dispatch:
+    inputs:
+      base_ref:
+        description: 'Base branch to compare against'
+        default: 'main'
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Resolve base SHA
+        id: base
+        run: |
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            echo "sha=${{ github.event.pull_request.base.sha }}" >> $GITHUB_OUTPUT
+          elif [ "${{ github.event_name }}" = "push" ]; then
+            echo "sha=$(git rev-parse origin/main)" >> $GITHUB_OUTPUT
+          else
+            echo "sha=$(git rev-parse origin/${{ inputs.base_ref || 'main' }})" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Detect changes
+        id: diff
+        run: |
+          CHANGED_FILES=$(git diff --name-only ${{ steps.base.outputs.sha }})
+
+          echo "CHANGED_FILES<<EOF" >> $GITHUB_OUTPUT
+          echo "$CHANGED_FILES" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+
+      - name: Enforce version bump
+        run: |
+          CHANGED="${{ steps.diff.outputs.CHANGED_FILES }}"
+
+          # Sanity check: only enforce if Rust files actually changed
+          if ! echo "$CHANGED" | grep -q "\.rs"; then
+            echo "No Rust changes detected"
+            exit 0
+          fi
+
+          # Require Cargo.toml to be modified
+          if ! echo "$CHANGED" | grep -q "Cargo.toml"; then
+            echo "Rust files changed but Cargo.toml not updated"
+            exit 1
+          fi
+
+          # Compare version values
+          OLD_VERSION=$(git show ${{ steps.base.outputs.sha }}:Cargo.toml | grep '^version' | head -1)
+          NEW_VERSION=$(grep '^version' Cargo.toml | head -1)
+
+          if [ "$OLD_VERSION" = "$NEW_VERSION" ]; then
+            echo "Cargo.toml version not bumped"
+            exit 1
+          fi
+
+          echo "Version bump detected"
