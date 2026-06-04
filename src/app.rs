@@ -177,6 +177,7 @@ pub enum InputMode {
     Edit,
     PlotLimit,
     SignalGen,
+    Dump,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -334,6 +335,14 @@ pub struct App {
     pub signal_gen_wave_idx: usize,
     pub signal_gen_dtype_idx: usize,
 
+    // Dump popup state
+    pub dump_format_idx: usize,   // 0 = CSV, 1 = Raw Binary
+    pub dump_dtype_idx: usize,    // index into DataType::all()
+    pub dump_endianness: Endianness,
+    pub dump_filename: String,
+    pub dump_focus: usize,
+    pub input_cursor: usize, // byte offset of cursor in the currently focused text field
+
     // Ingestion rate tracking
     pub rate_view: bool,
     pub rate_history_secs: u64,
@@ -432,6 +441,13 @@ impl App {
             signal_gen_focus: 0,
             signal_gen_wave_idx: 0,
             signal_gen_dtype_idx: 7, // float32 index in DataType::all()
+
+            dump_format_idx: 0,
+            dump_dtype_idx: 6, // Float32
+            dump_endianness: Endianness::Little,
+            dump_filename: String::new(),
+            dump_focus: 0,
+            input_cursor: 0,
 
             rate_view: false,
             rate_history_secs: 1200, // 20 minutes default (overridden by CLI)
@@ -1224,6 +1240,7 @@ impl App {
         }
         self.edit_fields = fields;
         self.edit_focus = 0;
+        self.input_cursor = self.edit_fields.get(0).map(|(_, v)| v.len()).unwrap_or(0);
         self.input_mode = InputMode::PlotLimit;
     }
 
@@ -1502,6 +1519,7 @@ impl App {
             }
             _ => return,
         }
+        self.input_cursor = self.edit_fields.get(0).map(|(_, v)| v.len()).unwrap_or(0);
         self.input_mode = InputMode::Edit;
     }
 
@@ -1525,6 +1543,7 @@ impl App {
         self.edit_operation = Some(EditOperation::SetTTL);
         self.edit_fields = vec![("TTL (seconds, empty=persist)".to_string(), current_ttl)];
         self.edit_focus = 0;
+        self.input_cursor = self.edit_fields.get(0).map(|(_, v)| v.len()).unwrap_or(0);
         self.input_mode = InputMode::Edit;
     }
 
@@ -1537,6 +1556,7 @@ impl App {
         self.edit_fields = vec![("New name".to_string(), key.clone())];
         self.edit_key = key;
         self.edit_focus = 0;
+        self.input_cursor = self.edit_fields.get(0).map(|(_, v)| v.len()).unwrap_or(0);
         self.input_mode = InputMode::Edit;
     }
 
@@ -1550,6 +1570,7 @@ impl App {
         ];
         self.edit_key.clear();
         self.edit_focus = 0;
+        self.input_cursor = 0; // new key: focus 0 is the type selector, text fields are empty
         self.input_mode = InputMode::Edit;
     }
 
@@ -1765,6 +1786,7 @@ impl App {
             ("Entries/Sec".to_string(), "10.0".to_string()),
         ];
         self.signal_gen_focus = 0;
+        self.input_cursor = 0; // focus starts on wave selector, not a text field
         self.input_mode = InputMode::SignalGen;
     }
 
@@ -1788,6 +1810,71 @@ impl App {
     #[allow(dead_code)]
     pub fn signal_gen_data_type(&self) -> DataType {
         DataType::all()[self.signal_gen_dtype_idx]
+    }
+
+    pub fn dump_is_csv(&self) -> bool {
+        self.dump_format_idx == 0
+    }
+
+    /// Index of the focusable filename row (0-based; varies by format)
+    pub fn dump_filename_focus(&self) -> usize {
+        if self.dump_is_csv() { 3 } else { 1 }
+    }
+
+    /// Highest valid focus index for the dump popup
+    pub fn dump_max_focus(&self) -> usize {
+        if self.dump_is_csv() { 3 } else { 1 }
+    }
+
+    pub fn start_dump_popup(&mut self) {
+        match &self.current_value {
+            Some(RedisValue::Stream(entries)) if !entries.is_empty() => {
+                if !entries.last().unwrap().fields.iter().any(|(n, _)| n.starts_with('_')) {
+                    self.status_message = "No binary (_) field in stream entry".to_string();
+                    return;
+                }
+            }
+            _ => {
+                self.status_message = "Dump requires a loaded stream key with a _ field".to_string();
+                return;
+            }
+        }
+
+        let slot = self
+            .plot_slots
+            .iter()
+            .find(|s| Some(s.key_name.as_str()) == self.selected_key_name());
+        let dtype_idx = slot
+            .map(|s| {
+                DataType::all()
+                    .iter()
+                    .position(|t| t == &s.data_type)
+                    .unwrap_or(6)
+            })
+            .unwrap_or_else(|| {
+                DataType::all()
+                    .iter()
+                    .position(|t| t == &self.data_type)
+                    .unwrap_or(6)
+            });
+        let endianness = slot.map(|s| s.endianness).unwrap_or(self.endianness);
+
+        let key_name = self.selected_key_name().unwrap_or("dump");
+        let safe: String = key_name
+            .chars()
+            .map(|c| match c {
+                ':' | '/' | '\\' | '*' | '?' | '"' | '<' | '>' | '|' => '_',
+                c => c,
+            })
+            .collect();
+
+        self.dump_format_idx = 0;
+        self.dump_dtype_idx = dtype_idx;
+        self.dump_endianness = endianness;
+        self.dump_filename = format!("{}.csv", safe);
+        self.dump_focus = 0;
+        self.input_cursor = 0; // focus starts on format selector, not the filename field
+        self.input_mode = InputMode::Dump;
     }
 }
 

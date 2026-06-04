@@ -40,6 +40,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         InputMode::Edit => draw_edit_popup(frame, app, size),
         InputMode::PlotLimit => draw_plot_limit_popup(frame, app, size),
         InputMode::SignalGen => draw_signal_gen_popup(frame, app, size),
+        InputMode::Dump => draw_dump_popup(frame, app, size),
         InputMode::Normal => {}
     }
 }
@@ -1068,8 +1069,14 @@ fn draw_filter_popup(frame: &mut Frame, app: &App, area: Rect) {
     let popup_area = centered_rect(50, 3, area);
     frame.render_widget(Clear, popup_area);
 
-    let text = format!("Filter: {}_", app.filter_text);
-    let popup = Paragraph::new(text).block(
+    let mut spans = vec![Span::styled("Filter: ", Style::default().fg(Color::Yellow))];
+    spans.extend(cursor_spans(
+        &app.filter_text,
+        app.input_cursor,
+        true,
+        Style::default().fg(Color::White),
+    ));
+    let popup = Paragraph::new(Line::from(spans)).block(
         Block::default()
             .borders(Borders::ALL)
             .border_style(Style::default().fg(HIGHLIGHT_COLOR))
@@ -1153,6 +1160,10 @@ fn draw_help_popup(frame: &mut Frame, app: &App, area: Rect) {
         Line::from(vec![
             Span::styled("  d        ", key_style),
             Span::raw("Delete the selected key (y/n to confirm)"),
+        ]),
+        Line::from(vec![
+            Span::styled("  o        ", key_style),
+            Span::raw("Dump last stream entry to file (CSV or raw binary)"),
         ]),
         Line::from(vec![
             Span::styled("  R        ", key_style),
@@ -1307,7 +1318,6 @@ fn draw_plot_limit_popup(frame: &mut Frame, app: &App, area: Rect) {
 
     for (i, (label, value)) in app.edit_fields.iter().enumerate() {
         let is_focused = i == app.edit_focus;
-        let cursor = if is_focused { "_" } else { "" };
         let indicator = if is_focused { "> " } else { "  " };
         let label_style = if is_focused {
             Style::default()
@@ -1321,11 +1331,12 @@ fn draw_plot_limit_popup(frame: &mut Frame, app: &App, area: Rect) {
         } else {
             Style::default().fg(Color::White)
         };
-        lines.push(Line::from(vec![
+        let mut row = vec![
             Span::styled(indicator, Style::default().fg(Color::Cyan)),
             Span::styled(format!("{}: ", label), label_style),
-            Span::styled(format!("{}{}", value, cursor), input_style),
-        ]));
+        ];
+        row.extend(cursor_spans(value, app.input_cursor, is_focused, input_style));
+        lines.push(Line::from(row));
     }
 
     lines.push(Line::from(""));
@@ -1426,12 +1437,12 @@ fn draw_signal_gen_popup(frame: &mut Frame, app: &App, area: Rect) {
         } else {
             Style::default().fg(Color::White)
         };
-        let cursor = if is_focused { "_" } else { "" };
-        lines.push(Line::from(vec![
+        let mut row = vec![
             Span::styled(indicator, Style::default().fg(Color::Cyan)),
             Span::styled(format!("{}: ", label), label_style),
-            Span::styled(format!("{}{}", value, cursor), input_style),
-        ]));
+        ];
+        row.extend(cursor_spans(value, app.input_cursor, is_focused, input_style));
+        lines.push(Line::from(row));
     }
 
     lines.push(Line::from(""));
@@ -1449,6 +1460,132 @@ fn draw_signal_gen_popup(frame: &mut Frame, app: &App, area: Rect) {
             .borders(Borders::ALL)
             .border_style(Style::default().fg(HIGHLIGHT_COLOR))
             .title(" Signal Generator "),
+    );
+    frame.render_widget(popup, popup_area);
+}
+
+fn draw_dump_popup(frame: &mut Frame, app: &App, area: Rect) {
+    const FORMATS: &[&str] = &["CSV", "Raw Binary"];
+    let is_csv = app.dump_is_csv();
+    let height = if is_csv { 13 } else { 10 };
+    let popup_area = centered_rect(60, height, area);
+    frame.render_widget(Clear, popup_area);
+
+    let dim = Style::default().fg(Color::DarkGray);
+
+    let mut lines: Vec<Line> = Vec::new();
+    lines.push(Line::from(Span::styled(
+        "Dump to File",
+        Style::default()
+            .fg(Color::Yellow)
+            .add_modifier(Modifier::BOLD),
+    )));
+    lines.push(Line::from(""));
+
+    // Row 0: Format selector
+    let fmt_focused = app.dump_focus == 0;
+    let fmt_indicator = if fmt_focused { "> " } else { "  " };
+    let fmt_label_style = if fmt_focused {
+        Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(Color::Yellow)
+    };
+    lines.push(Line::from(vec![
+        Span::styled(fmt_indicator, Style::default().fg(Color::Cyan)),
+        Span::styled("Format: ", fmt_label_style),
+        Span::styled("< ", dim),
+        Span::styled(
+            FORMATS[app.dump_format_idx],
+            Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(" >", dim),
+        if fmt_focused { Span::raw("  (Left/Right)") } else { Span::raw("") },
+    ]));
+
+    // Rows 1-2: Type and endianness selectors (CSV only)
+    if is_csv {
+        let dtype_focused = app.dump_focus == 1;
+        let dtype_indicator = if dtype_focused { "> " } else { "  " };
+        let dtype_label_style = if dtype_focused {
+            Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(Color::Yellow)
+        };
+        let dtype_name = format!("{}", DataType::all()[app.dump_dtype_idx]);
+        lines.push(Line::from(vec![
+            Span::styled(dtype_indicator, Style::default().fg(Color::Cyan)),
+            Span::styled("Type:   ", dtype_label_style),
+            Span::styled("< ", dim),
+            Span::styled(
+                dtype_name,
+                Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(" >", dim),
+            if dtype_focused { Span::raw("  (Left/Right)") } else { Span::raw("") },
+        ]));
+
+        let end_focused = app.dump_focus == 2;
+        let end_indicator = if end_focused { "> " } else { "  " };
+        let end_label_style = if end_focused {
+            Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(Color::Yellow)
+        };
+        lines.push(Line::from(vec![
+            Span::styled(end_indicator, Style::default().fg(Color::Cyan)),
+            Span::styled("Endian: ", end_label_style),
+            Span::styled("< ", dim),
+            Span::styled(
+                format!("{}", app.dump_endianness),
+                Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(" >", dim),
+            if end_focused { Span::raw("  (Left/Right)") } else { Span::raw("") },
+        ]));
+    }
+
+    lines.push(Line::from(""));
+
+    // Filename row
+    let file_focused = app.dump_focus == app.dump_filename_focus();
+    let file_indicator = if file_focused { "> " } else { "  " };
+    let file_label_style = if file_focused {
+        Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(Color::Yellow)
+    };
+    let file_input_style = if file_focused {
+        Style::default().fg(Color::White).bg(Color::DarkGray)
+    } else {
+        Style::default().fg(Color::White)
+    };
+    let mut file_row = vec![
+        Span::styled(file_indicator, Style::default().fg(Color::Cyan)),
+        Span::styled("File:   ", file_label_style),
+    ];
+    file_row.extend(cursor_spans(
+        &app.dump_filename,
+        app.input_cursor,
+        file_focused,
+        file_input_style,
+    ));
+    lines.push(Line::from(file_row));
+
+    lines.push(Line::from(""));
+    lines.push(Line::from(vec![
+        Span::styled("[Enter]", Style::default().fg(Color::Green)),
+        Span::raw(" Dump  "),
+        Span::styled("[Esc]", Style::default().fg(Color::Red)),
+        Span::raw(" Cancel  "),
+        Span::styled("[Tab]", Style::default().fg(Color::Yellow)),
+        Span::raw(" Next"),
+    ]));
+
+    let popup = Paragraph::new(lines).block(
+        Block::default()
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(HIGHLIGHT_COLOR))
+            .title(" Dump to File "),
     );
     frame.render_widget(popup, popup_area);
 }
@@ -1542,19 +1679,18 @@ fn draw_edit_popup(frame: &mut Frame, app: &App, area: Rect) {
             Style::default().fg(Color::Yellow)
         };
 
-        let cursor = if is_focused { "_" } else { "" };
         let input_style = if is_focused {
             Style::default().fg(Color::White).bg(Color::DarkGray)
         } else {
             Style::default().fg(Color::White)
         };
         let indicator = if is_focused { "> " } else { "  " };
-        let display_val = format!("{}{}", value, cursor);
-        lines.push(Line::from(vec![
+        let mut row = vec![
             Span::styled(indicator, Style::default().fg(Color::Cyan)),
             Span::styled(format!("{}: ", label), label_style),
-            Span::styled(display_val, input_style),
-        ]));
+        ];
+        row.extend(cursor_spans(value, app.input_cursor, is_focused, input_style));
+        lines.push(Line::from(row));
     }
 
     // Show hint about value format when binary mode is on
@@ -1678,6 +1814,36 @@ fn draw_crosshair(
             );
         }
     }
+}
+
+/// Renders a text field value with a block cursor at the given byte offset.
+/// When focused=false, returns a single unstyled span of the value.
+/// When at end of string, shows a trailing `_` cursor block.
+/// When inside the string, highlights the character at the cursor position.
+fn cursor_spans(value: &str, cursor: usize, focused: bool, style: Style) -> Vec<Span<'static>> {
+    if !focused {
+        return vec![Span::styled(value.to_string(), style)];
+    }
+    let cursor = cursor.min(value.len());
+    if cursor >= value.len() {
+        return vec![
+            Span::styled(value.to_string(), style),
+            Span::styled("_", Style::default().fg(Color::Black).bg(Color::White)),
+        ];
+    }
+    let char_end = value[cursor..]
+        .char_indices()
+        .nth(1)
+        .map(|(i, _)| cursor + i)
+        .unwrap_or(value.len());
+    vec![
+        Span::styled(value[..cursor].to_string(), style),
+        Span::styled(
+            value[cursor..char_end].to_string(),
+            Style::default().fg(Color::Black).bg(Color::White),
+        ),
+        Span::styled(value[char_end..].to_string(), style),
+    ]
 }
 
 fn centered_rect(percent_x: u16, height: u16, area: Rect) -> Rect {

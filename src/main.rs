@@ -359,22 +359,28 @@ fn run_app(
             // Handle paste events (bracketed paste from terminal)
             if let Event::Paste(data) = &ev {
                 match app.input_mode {
-                    InputMode::Filter => app.filter_text.push_str(data),
-                    InputMode::Edit => {
-                        if let Some((_label, value)) = app.edit_fields.get_mut(app.edit_focus) {
-                            value.push_str(data);
-                        }
+                    InputMode::Filter => {
+                        app.filter_text.insert_str(app.input_cursor, data);
+                        app.input_cursor += data.len();
                     }
-                    InputMode::PlotLimit => {
+                    InputMode::Edit | InputMode::PlotLimit => {
                         if let Some((_label, value)) = app.edit_fields.get_mut(app.edit_focus) {
-                            value.push_str(data);
+                            value.insert_str(app.input_cursor, data);
+                            app.input_cursor += data.len();
                         }
                     }
                     InputMode::SignalGen => {
                         if let Some(idx) = app.signal_gen_focus.checked_sub(2) {
                             if let Some((_label, value)) = app.signal_gen_fields.get_mut(idx) {
-                                value.push_str(data);
+                                value.insert_str(app.input_cursor, data);
+                                app.input_cursor += data.len();
                             }
+                        }
+                    }
+                    InputMode::Dump => {
+                        if app.dump_focus == app.dump_filename_focus() {
+                            app.dump_filename.insert_str(app.input_cursor, data);
+                            app.input_cursor += data.len();
                         }
                     }
                     _ => {}
@@ -446,6 +452,9 @@ fn run_app(
                                 }
                             }
                         }
+                    }
+                    InputMode::Dump => {
+                        handle_dump_input(&mut app, key.code);
                     }
                     InputMode::Normal => {
                         handle_normal_input(&mut app, client, key.code, key.modifiers);
@@ -687,8 +696,9 @@ fn handle_normal_input(
 
         // Actions
         KeyCode::Char('/') => {
-            app.input_mode = InputMode::Filter;
             app.filter_text.clear();
+            app.input_cursor = 0;
+            app.input_mode = InputMode::Filter;
         }
         KeyCode::Char('r') => {
             app.refresh_keys(client);
@@ -722,6 +732,10 @@ fn handle_normal_input(
             }
         }
 
+        KeyCode::Char('o') => {
+            app.start_dump_popup();
+        }
+
         KeyCode::Char('i') => {
             if app.rate_view {
                 // Always allow toggling off regardless of current key
@@ -753,6 +767,34 @@ fn handle_normal_input(
     }
 }
 
+// ─── Cursor / text-field helpers ──────────────────────────────────────────────
+
+fn cursor_left(s: &str, pos: usize) -> usize {
+    s[..pos].char_indices().next_back().map(|(i, _)| i).unwrap_or(0)
+}
+
+fn cursor_right(s: &str, pos: usize) -> usize {
+    let mut it = s[pos..].char_indices();
+    it.next();
+    it.next().map(|(i, _)| pos + i).unwrap_or(s.len())
+}
+
+fn field_insert(s: &mut String, pos: &mut usize, c: char) {
+    s.insert(*pos, c);
+    *pos += c.len_utf8();
+}
+
+fn field_backspace(s: &mut String, pos: &mut usize) {
+    if *pos == 0 {
+        return;
+    }
+    let prev = cursor_left(s, *pos);
+    s.drain(prev..*pos);
+    *pos = prev;
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+
 fn handle_filter_input(app: &mut App, client: &mut MultiRedisClient, code: KeyCode) {
     match code {
         KeyCode::Enter => {
@@ -764,12 +806,12 @@ fn handle_filter_input(app: &mut App, client: &mut MultiRedisClient, code: KeyCo
         KeyCode::Esc => {
             app.input_mode = InputMode::Normal;
         }
-        KeyCode::Backspace => {
-            app.filter_text.pop();
-        }
-        KeyCode::Char(c) => {
-            app.filter_text.push(c);
-        }
+        KeyCode::Left  => { app.input_cursor = cursor_left(&app.filter_text, app.input_cursor); }
+        KeyCode::Right => { app.input_cursor = cursor_right(&app.filter_text, app.input_cursor); }
+        KeyCode::Home  => { app.input_cursor = 0; }
+        KeyCode::End   => { app.input_cursor = app.filter_text.len(); }
+        KeyCode::Backspace => { field_backspace(&mut app.filter_text, &mut app.input_cursor); }
+        KeyCode::Char(c)   => { field_insert(&mut app.filter_text, &mut app.input_cursor, c); }
         _ => {}
     }
 }
@@ -848,6 +890,7 @@ fn handle_edit_input(
         }
         KeyCode::Tab => {
             app.edit_next_field();
+            app.input_cursor = app.edit_fields.get(app.edit_focus).map(|(_, v)| v.len()).unwrap_or(0);
         }
         KeyCode::BackTab => {
             // Reverse tab
@@ -858,6 +901,7 @@ fn handle_edit_input(
                     app.edit_focus -= 1;
                 }
             }
+            app.input_cursor = app.edit_fields.get(app.edit_focus).map(|(_, v)| v.len()).unwrap_or(0);
         }
         KeyCode::Enter => {
             match app.execute_edit(client) {
@@ -884,25 +928,41 @@ fn handle_edit_input(
                 }
             }
         }
-        // Left/Right to change type for new key
-        KeyCode::Left if is_new_key => {
+        // Left/Right to change type for new key (only on the type-selector row)
+        KeyCode::Left if is_new_key && app.edit_focus == 0 => {
             if app.new_key_type_idx == 0 {
                 app.new_key_type_idx = app::KEY_TYPES.len() - 1;
             } else {
                 app.new_key_type_idx -= 1;
             }
         }
-        KeyCode::Right if is_new_key => {
+        KeyCode::Right if is_new_key && app.edit_focus == 0 => {
             app.new_key_type_idx = (app.new_key_type_idx + 1) % app::KEY_TYPES.len();
+        }
+        KeyCode::Left => {
+            if let Some((_, v)) = app.edit_fields.get(app.edit_focus) {
+                app.input_cursor = cursor_left(v, app.input_cursor);
+            }
+        }
+        KeyCode::Right => {
+            if let Some((_, v)) = app.edit_fields.get(app.edit_focus) {
+                app.input_cursor = cursor_right(v, app.input_cursor);
+            }
+        }
+        KeyCode::Home => { app.input_cursor = 0; }
+        KeyCode::End => {
+            if let Some((_, v)) = app.edit_fields.get(app.edit_focus) {
+                app.input_cursor = v.len();
+            }
         }
         KeyCode::Backspace => {
             if let Some((_label, value)) = app.edit_fields.get_mut(app.edit_focus) {
-                value.pop();
+                field_backspace(value, &mut app.input_cursor);
             }
         }
         KeyCode::Char(c) => {
             if let Some((_label, value)) = app.edit_fields.get_mut(app.edit_focus) {
-                value.push(c);
+                field_insert(value, &mut app.input_cursor, c);
             }
         }
         _ => {}
@@ -916,9 +976,21 @@ fn handle_signal_gen_input(app: &mut App, code: KeyCode) {
         }
         KeyCode::Tab => {
             app.signal_gen_next_field();
+            if app.signal_gen_focus >= 2 {
+                app.input_cursor = app.signal_gen_fields
+                    .get(app.signal_gen_focus - 2).map(|(_, v)| v.len()).unwrap_or(0);
+            } else {
+                app.input_cursor = 0;
+            }
         }
         KeyCode::BackTab => {
             app.signal_gen_prev_field();
+            if app.signal_gen_focus >= 2 {
+                app.input_cursor = app.signal_gen_fields
+                    .get(app.signal_gen_focus - 2).map(|(_, v)| v.len()).unwrap_or(0);
+            } else {
+                app.input_cursor = 0;
+            }
         }
         KeyCode::Left => {
             match app.signal_gen_focus {
@@ -937,7 +1009,11 @@ fn handle_signal_gen_input(app: &mut App, code: KeyCode) {
                         app.signal_gen_dtype_idx -= 1;
                     }
                 }
-                _ => {}
+                _ => {
+                    if let Some((_, v)) = app.signal_gen_fields.get(app.signal_gen_focus - 2) {
+                        app.input_cursor = cursor_left(v, app.input_cursor);
+                    }
+                }
             }
         }
         KeyCode::Right => {
@@ -949,7 +1025,21 @@ fn handle_signal_gen_input(app: &mut App, code: KeyCode) {
                     let all = data::DataType::all();
                     app.signal_gen_dtype_idx = (app.signal_gen_dtype_idx + 1) % all.len();
                 }
-                _ => {}
+                _ => {
+                    if let Some((_, v)) = app.signal_gen_fields.get(app.signal_gen_focus - 2) {
+                        app.input_cursor = cursor_right(v, app.input_cursor);
+                    }
+                }
+            }
+        }
+        KeyCode::Home => {
+            if app.signal_gen_focus >= 2 { app.input_cursor = 0; }
+        }
+        KeyCode::End => {
+            if app.signal_gen_focus >= 2 {
+                if let Some((_, v)) = app.signal_gen_fields.get(app.signal_gen_focus - 2) {
+                    app.input_cursor = v.len();
+                }
             }
         }
         KeyCode::Enter => {
@@ -999,14 +1089,171 @@ fn handle_signal_gen_input(app: &mut App, code: KeyCode) {
         KeyCode::Backspace => {
             if let Some(idx) = app.signal_gen_focus.checked_sub(2) {
                 if let Some((_label, value)) = app.signal_gen_fields.get_mut(idx) {
-                    value.pop();
+                    field_backspace(value, &mut app.input_cursor);
                 }
             }
         }
         KeyCode::Char(c) => {
             if let Some(idx) = app.signal_gen_focus.checked_sub(2) {
                 if let Some((_label, value)) = app.signal_gen_fields.get_mut(idx) {
-                    value.push(c);
+                    field_insert(value, &mut app.input_cursor, c);
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+fn handle_dump_input(app: &mut App, code: KeyCode) {
+    const FORMATS: &[&str] = &["CSV", "Raw Binary"];
+
+    match code {
+        KeyCode::Esc => {
+            app.input_mode = InputMode::Normal;
+        }
+        KeyCode::Tab => {
+            app.dump_focus = (app.dump_focus + 1) % (app.dump_max_focus() + 1);
+            if app.dump_focus == app.dump_filename_focus() {
+                app.input_cursor = app.dump_filename.len();
+            } else {
+                app.input_cursor = 0;
+            }
+        }
+        KeyCode::BackTab => {
+            if app.dump_focus == 0 {
+                app.dump_focus = app.dump_max_focus();
+            } else {
+                app.dump_focus -= 1;
+            }
+            if app.dump_focus == app.dump_filename_focus() {
+                app.input_cursor = app.dump_filename.len();
+            } else {
+                app.input_cursor = 0;
+            }
+        }
+        KeyCode::Left => match (app.dump_focus, app.dump_is_csv()) {
+            (0, _) => {
+                if app.dump_format_idx == 0 {
+                    app.dump_format_idx = FORMATS.len() - 1;
+                } else {
+                    app.dump_format_idx -= 1;
+                }
+                if app.dump_focus > app.dump_max_focus() {
+                    app.dump_focus = app.dump_max_focus();
+                }
+            }
+            (1, true) => {
+                let len = data::DataType::all().len();
+                if app.dump_dtype_idx == 0 {
+                    app.dump_dtype_idx = len - 1;
+                } else {
+                    app.dump_dtype_idx -= 1;
+                }
+            }
+            (2, true) => {
+                app.dump_endianness = app.dump_endianness.toggle();
+            }
+            _ => {
+                if app.dump_focus == app.dump_filename_focus() {
+                    app.input_cursor = cursor_left(&app.dump_filename, app.input_cursor);
+                }
+            }
+        },
+        KeyCode::Right => match (app.dump_focus, app.dump_is_csv()) {
+            (0, _) => {
+                app.dump_format_idx = (app.dump_format_idx + 1) % FORMATS.len();
+                if app.dump_focus > app.dump_max_focus() {
+                    app.dump_focus = app.dump_max_focus();
+                }
+            }
+            (1, true) => {
+                app.dump_dtype_idx = (app.dump_dtype_idx + 1) % data::DataType::all().len();
+            }
+            (2, true) => {
+                app.dump_endianness = app.dump_endianness.toggle();
+            }
+            _ => {
+                if app.dump_focus == app.dump_filename_focus() {
+                    app.input_cursor = cursor_right(&app.dump_filename, app.input_cursor);
+                }
+            }
+        },
+        KeyCode::Home => {
+            if app.dump_focus == app.dump_filename_focus() {
+                app.input_cursor = 0;
+            }
+        }
+        KeyCode::End => {
+            if app.dump_focus == app.dump_filename_focus() {
+                app.input_cursor = app.dump_filename.len();
+            }
+        }
+        KeyCode::Backspace => {
+            if app.dump_focus == app.dump_filename_focus() {
+                field_backspace(&mut app.dump_filename, &mut app.input_cursor);
+            }
+        }
+        KeyCode::Char(c) => {
+            if app.dump_focus == app.dump_filename_focus() {
+                field_insert(&mut app.dump_filename, &mut app.input_cursor, c);
+            }
+        }
+        KeyCode::Enter => {
+            let filename = app.dump_filename.trim().to_string();
+            if filename.is_empty() {
+                app.status_message = "Error: filename cannot be empty".to_string();
+                return;
+            }
+
+            let result: Result<(), String> = (|| {
+                if let Some(redis_client::RedisValue::Stream(entries)) = &app.current_value {
+                    let entry = entries.last().ok_or("No entries loaded")?;
+                    let (_, bytes) = entry
+                        .fields
+                        .iter()
+                        .find(|(n, _)| n.starts_with('_'))
+                        .ok_or("No binary (_) field in entry")?;
+
+                    if app.dump_is_csv() {
+                        let dtype = data::DataType::all()[app.dump_dtype_idx];
+                        let values = data::decode_blob(bytes, dtype, app.dump_endianness);
+                        let key_name = app.selected_key_name().unwrap_or("unknown");
+                        let mut content = format!(
+                            "# key: {}\n# id: {}\n# dtype: {}\n# endian: {}\n# samples: {}\n",
+                            key_name, entry.id, dtype, app.dump_endianness, values.len()
+                        );
+                        for &v in &values {
+                            match dtype {
+                                data::DataType::Float32 | data::DataType::Float64 => {
+                                    content.push_str(&format!("{:.6}\n", v));
+                                }
+                                _ => {
+                                    content.push_str(&format!("{}\n", v as i64));
+                                }
+                            }
+                        }
+                        std::fs::write(&filename, content).map_err(|e| e.to_string())
+                    } else {
+                        std::fs::write(&filename, bytes.as_slice())
+                            .map_err(|e| e.to_string())
+                    }
+                } else {
+                    Err("Selected key is not a loaded stream".to_string())
+                }
+            })();
+
+            match result {
+                Ok(()) => {
+                    app.status_message = format!("Dumped to {}", filename);
+                    app.input_mode = InputMode::Normal;
+                }
+                Err(e) => {
+                    app.status_message = format!("Dump error: {}", e);
+                    // Keep popup open for file I/O errors so user can fix path;
+                    // close for logic errors (wrong key type, etc.)
+                    if e.starts_with("No ") || e.starts_with("Selected") {
+                        app.input_mode = InputMode::Normal;
+                    }
                 }
             }
         }
@@ -1021,6 +1268,7 @@ fn handle_plot_limit_input(app: &mut App, code: KeyCode) {
         }
         KeyCode::Tab => {
             app.edit_next_field();
+            app.input_cursor = app.edit_fields.get(app.edit_focus).map(|(_, v)| v.len()).unwrap_or(0);
         }
         KeyCode::BackTab => {
             if !app.edit_fields.is_empty() {
@@ -1029,6 +1277,23 @@ fn handle_plot_limit_input(app: &mut App, code: KeyCode) {
                 } else {
                     app.edit_focus -= 1;
                 }
+            }
+            app.input_cursor = app.edit_fields.get(app.edit_focus).map(|(_, v)| v.len()).unwrap_or(0);
+        }
+        KeyCode::Left => {
+            if let Some((_, v)) = app.edit_fields.get(app.edit_focus) {
+                app.input_cursor = cursor_left(v, app.input_cursor);
+            }
+        }
+        KeyCode::Right => {
+            if let Some((_, v)) = app.edit_fields.get(app.edit_focus) {
+                app.input_cursor = cursor_right(v, app.input_cursor);
+            }
+        }
+        KeyCode::Home => { app.input_cursor = 0; }
+        KeyCode::End => {
+            if let Some((_, v)) = app.edit_fields.get(app.edit_focus) {
+                app.input_cursor = v.len();
             }
         }
         KeyCode::Enter => {
@@ -1045,12 +1310,12 @@ fn handle_plot_limit_input(app: &mut App, code: KeyCode) {
         }
         KeyCode::Backspace => {
             if let Some((_label, value)) = app.edit_fields.get_mut(app.edit_focus) {
-                value.pop();
+                field_backspace(value, &mut app.input_cursor);
             }
         }
         KeyCode::Char(c) => {
             if let Some((_label, value)) = app.edit_fields.get_mut(app.edit_focus) {
-                value.push(c);
+                field_insert(value, &mut app.input_cursor, c);
             }
         }
         _ => {}
