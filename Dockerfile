@@ -26,8 +26,24 @@ RUN touch src/main.rs \
     && cp target/$(cat /tmp/rust-target)/release/redis-tui /redis-tui
 
 # Runtime stage - scratch since the binary is fully static
-FROM alpine:latest
+FROM alpine:latest AS runtime
 
 COPY --from=builder /redis-tui /usr/local/bin/redis-tui
+
+CMD ["redis-tui"]
+
+############################
+# Publish stage: single-owner squash
+############################
+# Rootless podman without subordinate UID/GID ranges cannot chown
+# extracted layer files to unmapped IDs, so layers containing any
+# non-root-owned files fail to pull without storage.conf changes.
+# Squashing the finished rootfs through scratch with --chown=0:0 makes
+# every file root-owned in one layer: extraction only chowns to the
+# caller's own mapped UID, so the image runs on stock rootless podman
+# with zero host configuration. Nothing here needs setuid or per-user
+# ownership, so the squash is lossless.
+FROM scratch AS publish
+COPY --from=runtime --chown=0:0 / /
 
 CMD ["redis-tui"]
