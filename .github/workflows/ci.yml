@@ -74,7 +74,7 @@ jobs:
 
       # ---- Ratchet: reported, not enforced ----
       #
-      # main still carries ~188 pre-existing rustfmt diffs that belong to no single
+      # main still carries ~198 pre-existing rustfmt diffs that belong to no single
       # change. Enforcing now would make CI red on every PR regardless of its
       # contents, and reformatting the tree would bury real diffs in noise.
       #

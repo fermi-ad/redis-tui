@@ -221,6 +221,10 @@ impl StreamListener {
         })
     }
 
+    // Reached only through Drop, and the test target never constructs a listener -
+    // main() is replaced by the harness there - so rustc sees this as dead in that
+    // build. It is live in the real binary.
+    #[allow(dead_code)]
     fn stop(&mut self) {
         self.stop_flag.store(true, Ordering::Relaxed);
         if let Some(h) = self.handle.take() {
@@ -279,6 +283,9 @@ impl SignalGenerator {
         })
     }
 
+    // Same as StreamListener::stop - live in the binary, unreachable in the test
+    // target, which never constructs a generator.
+    #[allow(dead_code)]
     fn stop(&mut self) {
         self.stop_flag.store(true, Ordering::Relaxed);
         if let Some(h) = self.handle.take() {
