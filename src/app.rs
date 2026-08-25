@@ -850,36 +850,6 @@ impl App {
         }
     }
 
-    /// Reload the current value without resetting scroll.
-    #[allow(dead_code)]
-    pub fn refresh_selected_value(&mut self, client: &mut MultiRedisClient) {
-        if let Some(idx) = self.key_list_state.selected() {
-            if idx < self.keys.len() {
-                let key = self.keys[idx].clone();
-
-                if let Ok(info) = client.get_key_info(&key) {
-                    self.current_key_info = Some(info);
-                }
-
-                match client.get_value(&key) {
-                    Ok(mut value) => {
-                        cap_stream_entries(&mut value);
-                        if let RedisValue::Stream(ref entries) = value {
-                            self.last_stream_id =
-                                entries.last().map(|e| e.id.clone());
-                        }
-                        self.update_plot_data(&value);
-                        if self.fft_enabled {
-                            self.compute_fft();
-                        }
-                        self.current_value = Some(value);
-                    }
-                    Err(_) => {}
-                }
-            }
-        }
-    }
-
     pub fn is_viewing_stream(&self) -> bool {
         matches!(
             &self.current_key_info,
