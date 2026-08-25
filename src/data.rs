@@ -211,7 +211,7 @@ pub fn format_hex(bytes: &[u8]) -> String {
 /// Supports ints and floats depending on the target DataType.
 pub fn encode_values(input: &str, data_type: DataType, endianness: Endianness) -> Result<Vec<u8>, String> {
     let tokens: Vec<&str> = input
-        .split(|c: char| c == ',' || c == ' ')
+        .split([',', ' '])
         .map(|s| s.trim())
         .filter(|s| !s.is_empty())
         .collect();

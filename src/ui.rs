@@ -298,7 +298,7 @@ fn draw_value_view(frame: &mut Frame, app: &mut App, area: Rect) {
                         let remaining_secs = match tracker.tracking_start_ms {
                             Some(start_ms) => {
                                 let warmup_end_ms = start_ms + chart_window * 1000;
-                                ((warmup_end_ms.saturating_sub(now_ms)) + 999) / 1000
+                                (warmup_end_ms.saturating_sub(now_ms)).div_ceil(1000)
                             }
                             None => chart_window,
                         };
@@ -1098,7 +1098,7 @@ fn draw_confirm_popup(frame: &mut Frame, app: &App, area: Rect) {
 }
 
 fn draw_help_popup(frame: &mut Frame, app: &App, area: Rect) {
-    let max_height = area.height.saturating_sub(2).min(50) as u16;
+    let max_height = area.height.saturating_sub(2).min(50);
     let popup_area = centered_rect(72, max_height, area);
     frame.render_widget(Clear, popup_area);
 
@@ -1610,7 +1610,7 @@ fn draw_crosshair(
     let frac_x = (data_x - x_lo) / (x_hi - x_lo);
     let frac_y = (data_y - y_lo) / (y_hi - y_lo);
 
-    if frac_x < 0.0 || frac_x > 1.0 || frac_y < 0.0 || frac_y > 1.0 {
+    if !(0.0..=1.0).contains(&frac_x) || !(0.0..=1.0).contains(&frac_y) {
         return;
     }
 
@@ -1833,6 +1833,40 @@ mod tests {
                 draw_crosshair(frame, cx, cy, cw, ch, 100.0, 100.0, 0.0, 100.0, 0.0, 100.0);
             })
             .unwrap();
+    }
+
+    #[test]
+    fn crosshair_skipped_for_non_finite_coordinates() {
+        // NaN fails every comparison, so `frac < 0.0 || frac > 1.0` does not catch it.
+        // Execution then reaches `(NaN * ..) as u16`, which saturates to 0 and pins a
+        // bogus crosshair to the chart's top-left corner as if that were the data point.
+        for (dx, dy) in [
+            (f64::NAN, 50.0),
+            (50.0, f64::NAN),
+            (f64::NAN, f64::NAN),
+        ] {
+            let backend = TestBackend::new(80, 24);
+            let mut terminal = Terminal::new(backend).unwrap();
+            terminal
+                .draw(|frame| {
+                    draw_crosshair(frame, 10, 5, 60, 15, dx, dy, 0.0, 100.0, 0.0, 100.0);
+                })
+                .unwrap();
+
+            let buffer = terminal.backend().buffer().clone();
+            let drawn: String = buffer
+                .content()
+                .iter()
+                .map(|c| c.symbol().chars().next().unwrap_or(' '))
+                .collect();
+
+            assert!(
+                !drawn.contains('\u{2502}') && !drawn.contains('\u{2500}'),
+                "non-finite coordinates ({}, {}) must not draw a crosshair",
+                dx,
+                dy
+            );
+        }
     }
 
     #[test]
