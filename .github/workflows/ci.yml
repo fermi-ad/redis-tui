@@ -1,17 +1,21 @@
 name: CI
 
 on:
+  # Scoped to main deliberately. Firing on every branch push as well meant a PR
+  # branch triggered both `push` and `pull_request`, running the whole job twice;
+  # de-duplicating them via `concurrency` fixed the waste but left the cancelled
+  # run reported as a failed check, which showed the PR as UNSTABLE with nothing
+  # actually wrong. Branch work is covered by the `pull_request` run, and main is
+  # covered here after merge.
   push:
+    branches: [main]
   pull_request:
     branches: [main]
   workflow_dispatch:
 
-# A push to a PR branch triggers both `push` and `pull_request`, and those two
-# events report different refs for the same branch - `refs/heads/<branch>` versus
-# `refs/pull/<n>/merge` - so keying on `github.ref` would put them in separate
-# groups and run the whole job twice. `head_ref` is set only for pull_request and
-# `ref_name` is the bare branch name, so this key is the branch either way and the
-# newer run cancels the older.
+# Successive pushes to the same PR branch supersede each other. Keyed on the
+# branch rather than `github.ref`, since the two events report different refs for
+# the same branch (`refs/heads/<branch>` vs `refs/pull/<n>/merge`).
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.head_ref || github.ref_name }}
   cancel-in-progress: true
