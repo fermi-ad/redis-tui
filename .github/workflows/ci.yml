@@ -1,0 +1,106 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+# A push to a PR branch triggers both `push` and `pull_request`. Superseded runs
+# on the same ref are cancelled rather than left to finish.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # Rust, clippy and rustfmt are preinstalled on GitHub-hosted ubuntu runners,
+      # so no toolchain action is needed. Print the versions so a runner image
+      # update that changes behaviour is visible in the log.
+      - name: Show toolchain
+        run: |
+          rustc --version
+          cargo --version
+          cargo clippy --version
+          cargo fmt --version
+
+      # The live tests spawn their own throwaway servers on OS-assigned ports via
+      # the TestRedis harness, so only the binary needs to be on PATH - no service
+      # container and no port configuration.
+      - name: Install redis-server
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends redis-server
+          redis-server --version
+
+      - name: Cache cargo registry and build
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-
+
+      # ---- Hard gates: these are green on main today and must stay green ----
+
+      - name: Build (debug)
+        run: cargo build --locked --all-targets
+
+      - name: Build (release)
+        run: cargo build --locked --release
+
+      - name: Test
+        run: cargo test --locked
+
+      - name: Test (live Redis)
+        run: cargo test --locked -- --ignored
+
+      # ---- Ratchet: reported, not enforced ----
+      #
+      # main carries pre-existing debt that is unrelated to any single change
+      # (12 clippy warnings, 188 rustfmt diffs). Enforcing these now would make CI
+      # red on every PR regardless of its contents, and reformatting the tree to
+      # clear it would bury real diffs in noise.
+      #
+      # `-D warnings` is deliberate: plain `cargo clippy` exits 0 on warnings, so
+      # without it the step would always pass and the debt would be invisible.
+      # Paired with continue-on-error the step goes red while the job stays green.
+      #
+      # To enforce these later, delete the `continue-on-error` lines. See #64.
+
+      - name: Clippy (reported, not enforced)
+        id: clippy
+        continue-on-error: true
+        run: cargo clippy --locked --all-targets -- -D warnings
+
+      - name: Format check (reported, not enforced)
+        id: fmt
+        continue-on-error: true
+        run: cargo fmt --check
+
+      - name: Lint debt summary
+        if: always()
+        run: |
+          {
+            echo "### Lint status"
+            echo
+            echo "| Check | Result | Enforced |"
+            echo "| ----- | ------ | -------- |"
+            echo "| Clippy | ${{ steps.clippy.outcome }} | no |"
+            echo "| Format | ${{ steps.fmt.outcome }} | no |"
+            echo
+            echo "Build and tests are enforced. Clippy and format are reported only"
+            echo "while pre-existing debt is cleared - see issue #64."
+          } >> "$GITHUB_STEP_SUMMARY"
