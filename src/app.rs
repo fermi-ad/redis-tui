@@ -1175,8 +1175,8 @@ impl App {
                     (-0.05, 1.05)
                 } else if !self.plot_slots.is_empty() {
                     let slot = &self.plot_slots[0];
-                    if slot.y_min.is_some() && slot.y_max.is_some() {
-                        (slot.y_min.unwrap(), slot.y_max.unwrap())
+                    if let (Some(y_min), Some(y_max)) = (slot.y_min, slot.y_max) {
+                        (y_min, y_max)
                     } else {
                         self.auto_signal_bounds()
                     }
