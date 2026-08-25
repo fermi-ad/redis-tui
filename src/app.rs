@@ -688,7 +688,7 @@ impl App {
 
     pub fn refresh_keys(&mut self, client: &mut MultiRedisClient) {
         match client.scan_keys(&self.filter_pattern) {
-            Ok(keys) => {
+            Ok((keys, skipped)) => {
                 // Get types for each key
                 let mut types = Vec::with_capacity(keys.len());
                 for key in &keys {
@@ -705,14 +705,24 @@ impl App {
                 self.collisions = client.collisions.clone();
                 let collision_count = self.collisions.len();
 
+                // Keys that failed UTF-8 decoding cannot be shown in a text UI, but
+                // staying silent would make Redis look like it holds fewer keys than it does.
+                let skipped_note = if skipped > 0 {
+                    format!(" ({} skipped: encoding errors)", skipped)
+                } else {
+                    String::new()
+                };
+
                 if collision_count > 0 {
                     self.status_message = format!(
-                        "Loaded {} keys ({} collisions!)",
+                        "Loaded {} keys ({} collisions!){}",
                         self.keys.len(),
-                        collision_count
+                        collision_count,
+                        skipped_note
                     );
                 } else {
-                    self.status_message = format!("Loaded {} keys", self.keys.len());
+                    self.status_message =
+                        format!("Loaded {} keys{}", self.keys.len(), skipped_note);
                 }
 
                 // Preserve selection if possible
@@ -1229,10 +1239,8 @@ impl App {
 
     /// Apply plot settings: unified X + per-slot Y limits
     pub fn apply_plot_settings(&mut self) -> Result<(), String> {
-        let x_min: f64 = self.edit_fields[0].1.trim().parse()
-            .map_err(|_| "Invalid X Min".to_string())?;
-        let x_max: f64 = self.edit_fields[1].1.trim().parse()
-            .map_err(|_| "Invalid X Max".to_string())?;
+        let x_min = parse_finite(&self.edit_fields[0].1, "X Min")?;
+        let x_max = parse_finite(&self.edit_fields[1].1, "X Max")?;
         if x_min >= x_max {
             return Err("X Min must be less than X Max".to_string());
         }
@@ -1250,10 +1258,8 @@ impl App {
         if self.plot_slots.is_empty() {
             // Single Y range
             if self.edit_fields.len() >= 4 {
-                let y_min: f64 = self.edit_fields[2].1.trim().parse()
-                    .map_err(|_| "Invalid Y Min".to_string())?;
-                let y_max: f64 = self.edit_fields[3].1.trim().parse()
-                    .map_err(|_| "Invalid Y Max".to_string())?;
+                let y_min = parse_finite(&self.edit_fields[2].1, "Y Min")?;
+                let y_max = parse_finite(&self.edit_fields[3].1, "Y Max")?;
                 if y_min >= y_max {
                     return Err("Y Min must be less than Y Max".to_string());
                 }
@@ -1266,10 +1272,14 @@ impl App {
             for (i, slot) in self.plot_slots.iter_mut().enumerate() {
                 let base = 2 + i * 2;
                 if base + 1 < self.edit_fields.len() {
-                    let y_min: f64 = self.edit_fields[base].1.trim().parse()
-                        .map_err(|_| format!("Invalid Y Min for '{}'", slot.key_name))?;
-                    let y_max: f64 = self.edit_fields[base + 1].1.trim().parse()
-                        .map_err(|_| format!("Invalid Y Max for '{}'", slot.key_name))?;
+                    let y_min = parse_finite(
+                        &self.edit_fields[base].1,
+                        &format!("Y Min for '{}'", slot.key_name),
+                    )?;
+                    let y_max = parse_finite(
+                        &self.edit_fields[base + 1].1,
+                        &format!("Y Max for '{}'", slot.key_name),
+                    )?;
                     if y_min >= y_max {
                         return Err(format!("Y Min >= Y Max for '{}'", slot.key_name));
                     }
@@ -1952,6 +1962,22 @@ fn cap_stream_entries(value: &mut RedisValue) {
     }
 }
 
+/// Parse a user-entered plot bound, rejecting anything non-finite.
+///
+/// `"nan"` and `"inf"` both parse successfully as f64, and every comparison against NaN
+/// is false - so without an explicit finite check they slip past the min/max guards and
+/// poison the chart bounds.
+fn parse_finite(raw: &str, label: &str) -> Result<f64, String> {
+    let value: f64 = raw
+        .trim()
+        .parse()
+        .map_err(|_| format!("Invalid {}", label))?;
+    if !value.is_finite() {
+        return Err(format!("{} must be a finite number", label));
+    }
+    Ok(value)
+}
+
 fn extract_stream_plot_data(
     entries: &[StreamEntry],
     data_type: DataType,
@@ -2037,6 +2063,72 @@ pub fn compute_fft_magnitude(data: &[f64]) -> Vec<f64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ---- #31: plot limit validation rejects non-finite values ----
+
+    fn app_with_plot_fields(fields: &[&str]) -> App {
+        let mut app = App::new();
+        app.edit_fields = fields
+            .iter()
+            .map(|v| ("f".to_string(), v.to_string()))
+            .collect();
+        app
+    }
+
+    #[test]
+    fn plot_settings_rejects_nan_x_min() {
+        // "nan".parse::<f64>() succeeds, and NaN >= x_max is false, so NaN slips
+        // past the min/max guard and poisons the chart bounds.
+        let mut app = app_with_plot_fields(&["nan", "100", "0", "1"]);
+        assert!(app.apply_plot_settings().is_err());
+    }
+
+    #[test]
+    fn plot_settings_rejects_negative_infinite_x_min() {
+        let mut app = app_with_plot_fields(&["-inf", "100", "0", "1"]);
+        assert!(app.apply_plot_settings().is_err());
+    }
+
+    #[test]
+    fn plot_settings_rejects_infinite_x_max() {
+        let mut app = app_with_plot_fields(&["0", "inf", "0", "1"]);
+        assert!(app.apply_plot_settings().is_err());
+    }
+
+    #[test]
+    fn plot_settings_rejects_nan_y_min() {
+        let mut app = app_with_plot_fields(&["0", "100", "nan", "1"]);
+        assert!(app.apply_plot_settings().is_err());
+    }
+
+    #[test]
+    fn plot_settings_rejects_infinite_y_max() {
+        let mut app = app_with_plot_fields(&["0", "100", "0", "inf"]);
+        assert!(app.apply_plot_settings().is_err());
+    }
+
+    #[test]
+    fn plot_settings_rejects_nan_in_per_slot_y() {
+        let mut app = App::new();
+        app.toggle_plot_slot("mykey");
+        app.edit_fields = vec![
+            ("X Min".to_string(), "0".to_string()),
+            ("X Max".to_string(), "100".to_string()),
+            ("Y Min".to_string(), "nan".to_string()),
+            ("Y Max".to_string(), "1".to_string()),
+        ];
+        assert!(app.apply_plot_settings().is_err());
+    }
+
+    #[test]
+    fn plot_settings_accepts_finite_values() {
+        let mut app = app_with_plot_fields(&["0", "100", "-5", "5"]);
+        assert!(app.apply_plot_settings().is_ok());
+        assert_eq!(app.plot_x_min, 0.0);
+        assert_eq!(app.plot_x_max, 100.0);
+        assert_eq!(app.plot_y_min, -5.0);
+        assert_eq!(app.plot_y_max, 5.0);
+    }
 
     #[test]
     fn toggle_plot_slot_adds_key() {
