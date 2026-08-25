@@ -685,9 +685,9 @@ fn draw_signal_chart(frame: &mut Frame, app: &mut App, area: Rect, title: &str, 
         (-0.05, 1.05)
     } else if !app.plot_slots.is_empty() {
         let slot = &app.plot_slots[0];
-        if slot.y_min.is_some() && slot.y_max.is_some() {
+        if let (Some(y_min), Some(y_max)) = (slot.y_min, slot.y_max) {
             // Manual per-slot limits
-            (slot.y_min.unwrap(), slot.y_max.unwrap())
+            (y_min, y_max)
         } else {
             // Auto: use actual data bounds
             let all_data: Vec<f64> = slot.data.iter().copied()
