@@ -127,7 +127,7 @@ The chart Y bounds must match between `ui.rs` rendering and `app.rs` `mouse_to_d
 
 Tests are `#[cfg(test)]` modules at the bottom of `data.rs`, `app.rs`, `ui.rs`, and `redis_client.rs`. Tests in `ui.rs` use `ratatui::backend::TestBackend` for rendering verification.
 
-There is no `tests/` directory: this is a binary-only crate with no lib target, so external integration tests cannot import the modules. Tests needing a live Redis live in `redis_client.rs`'s test module instead, marked `#[ignore]` and run with `cargo test -- --ignored`. The `TestRedis` harness there spawns a throwaway `redis-server` per test (claiming a port from an `AtomicU16` starting at 6390, since cargo runs tests in parallel) and kills it on `Drop`. They require `redis-server` on `PATH` and are not run by `cargo test` alone.
+There is no `tests/` directory: this is a binary-only crate with no lib target, so external integration tests cannot import the modules. Tests needing a live Redis live in `redis_client.rs`'s test module instead, marked `#[ignore]` and run with `cargo test -- --ignored`. The `TestRedis` harness there spawns a throwaway `redis-server` per test and kills it on `Drop`. Ports come from the OS (bind `127.0.0.1:0`, read the assigned port, release it) rather than a fixed or sequential range, so parallel tests and concurrent `cargo test` runs cannot collide with each other or with a dev instance on 6379/6380; `start()` retries up to 5 times on a fresh port and detects early child exit via `try_wait`. They require `redis-server` on `PATH` and are not run by `cargo test` alone.
 
 ## Conventions
 

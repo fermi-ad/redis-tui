@@ -42,7 +42,7 @@ pub struct RedisClient {
 ///
 /// Returns 0 when the URL carries no usable database component. Query strings and
 /// fragments are stripped first, so `redis://host/3?timeout=5` yields 3 rather than
-/// silently falling back to 0.
+/// silently falling back to 0, and a trailing slash (`redis://host/3/`) is tolerated.
 fn parse_db_from_url(url: &str) -> i64 {
     // Strip `?query` and `#fragment` before looking at the path.
     let trimmed = url.split(['?', '#']).next().unwrap_or(url);
@@ -58,8 +58,10 @@ fn parse_db_from_url(url: &str) -> i64 {
         return 0;
     };
 
+    // Take the last *non-empty* segment: a trailing slash ("/3/") would otherwise
+    // yield an empty final segment and look like no db was given at all.
     path.rsplit('/')
-        .next()
+        .find(|segment| !segment.is_empty())
         .and_then(|s| s.parse::<i64>().ok())
         .filter(|db| *db >= 0)
         .unwrap_or(0)
@@ -70,10 +72,15 @@ fn parse_db_from_url(url: &str) -> i64 {
 /// Redis treats `EXPIRE key 0` as "expire immediately", which deletes the key. That is
 /// almost never what someone typing 0 into a TTL field means, so it is refused here
 /// rather than reinterpreted - no command reaches Redis.
+///
+/// Any negative TTL means persist (see `set_ttl`), which is what the edit field's
+/// "empty=persist" path sends as -1. The message says "negative" rather than naming -1
+/// so it stays true to the behaviour callers actually get.
 fn validate_ttl(ttl: i64, key: &str) -> Result<()> {
     if ttl == 0 {
         anyhow::bail!(
-            "TTL 0 would delete '{}'. Use -1 to persist, or delete the key explicitly.",
+            "TTL 0 would delete '{}'. Leave the field empty (or use a negative TTL) to persist, \
+             or delete the key explicitly.",
             key
         );
     }
@@ -806,13 +813,22 @@ impl MultiRedisClient {
 mod tests {
     use super::*;
 
+    use std::net::TcpListener;
     use std::process::{Child, Command, Stdio};
-    use std::sync::atomic::{AtomicU16, Ordering};
 
-    /// Ports are handed out per-test because cargo runs tests in parallel; a single
-    /// hardcoded port would make these collide with each other and with any dev
-    /// instance already on 6379/6380.
-    static NEXT_PORT: AtomicU16 = AtomicU16::new(6390);
+    /// Ask the OS for a currently-free port, then release it so redis-server can bind.
+    ///
+    /// Cargo runs tests in parallel and several `cargo test` runs may overlap on one
+    /// machine, so a fixed or sequentially-allocated port collides sooner or later -
+    /// with sibling tests, with a dev instance on 6379/6380, or with anything else on
+    /// the box. Letting the kernel pick removes the guess; the small window between
+    /// releasing the port and redis binding it is covered by the retry in `start`.
+    fn free_port() -> Option<u16> {
+        let listener = TcpListener::bind("127.0.0.1:0").ok()?;
+        let port = listener.local_addr().ok()?.port();
+        drop(listener);
+        Some(port)
+    }
 
     /// A throwaway redis-server that is killed when the test ends.
     struct TestRedis {
@@ -822,7 +838,24 @@ mod tests {
 
     impl TestRedis {
         fn start() -> Self {
-            let port = NEXT_PORT.fetch_add(1, Ordering::SeqCst);
+            const ATTEMPTS: usize = 5;
+            let mut last_error = "no attempt made".to_string();
+
+            for _ in 0..ATTEMPTS {
+                let Some(port) = free_port() else {
+                    last_error = "could not obtain a free port from the OS".to_string();
+                    continue;
+                };
+                match Self::try_start(port) {
+                    Ok(server) => return server,
+                    Err(e) => last_error = e,
+                }
+            }
+
+            panic!("could not start redis-server after {ATTEMPTS} attempts: {last_error}");
+        }
+
+        fn try_start(port: u16) -> Result<Self, String> {
             let child = Command::new("redis-server")
                 .args([
                     "--port", &port.to_string(),
@@ -833,18 +866,36 @@ mod tests {
                 .stdout(Stdio::null())
                 .stderr(Stdio::null())
                 .spawn()
-                .expect("redis-server must be installed to run --ignored tests");
+                .map_err(|e| {
+                    format!("could not spawn redis-server ({e}); it must be installed to run --ignored tests")
+                })?;
 
-            let server = TestRedis { child, port };
+            let mut server = TestRedis { child, port };
+            let url = server.url();
+
             for _ in 0..100 {
-                if let Ok(c) = redis::Client::open(server.url().as_str()) {
-                    if c.get_connection().is_ok() {
-                        return server;
+                // A bind failure makes redis exit almost immediately - notice that
+                // instead of waiting out the full readiness timeout.
+                match server.child.try_wait() {
+                    Ok(Some(status)) => {
+                        return Err(format!(
+                            "redis-server on port {port} exited early ({status})"
+                        ))
+                    }
+                    Ok(None) => {}
+                    Err(e) => return Err(format!("could not poll redis-server: {e}")),
+                }
+
+                if let Ok(client) = redis::Client::open(url.as_str()) {
+                    if client.get_connection().is_ok() {
+                        return Ok(server);
                     }
                 }
                 std::thread::sleep(std::time::Duration::from_millis(50));
             }
-            panic!("redis-server on port {} never became ready", port);
+
+            // Dropping `server` kills the child, so the next attempt starts clean.
+            Err(format!("redis-server on port {port} never became ready"))
         }
 
         fn url(&self) -> String {
@@ -998,6 +1049,30 @@ mod tests {
     }
 
     #[test]
+    fn ttl_any_negative_is_accepted_as_persist() {
+        // set_ttl routes every ttl < 0 to PERSIST, so validation must not single out -1.
+        for ttl in [-1, -2, -100, i64::MIN] {
+            assert!(
+                validate_ttl(ttl, "mykey").is_ok(),
+                "ttl {} should be allowed",
+                ttl
+            );
+        }
+    }
+
+    #[test]
+    fn ttl_zero_error_does_not_name_a_specific_sentinel() {
+        // The edit field is labelled "empty=persist"; the message must not invent a
+        // different contract by telling users to type -1.
+        let err = validate_ttl(0, "mykey").unwrap_err().to_string();
+        assert!(
+            err.contains("empty"),
+            "message should point at the documented path: {}",
+            err
+        );
+    }
+
+    #[test]
     fn ttl_positive_is_accepted() {
         assert!(validate_ttl(60, "mykey").is_ok());
     }
@@ -1067,6 +1142,18 @@ mod tests {
     #[test]
     fn db_parses_with_auth_in_url() {
         assert_eq!(parse_db_from_url("redis://user:pw@127.0.0.1:6379/5"), 5);
+    }
+
+    #[test]
+    fn db_parses_with_trailing_slash() {
+        // rsplit('/') on "3/" yields an empty final segment, which must not be
+        // mistaken for "no db given".
+        assert_eq!(parse_db_from_url("redis://127.0.0.1:6379/3/"), 3);
+    }
+
+    #[test]
+    fn db_parses_with_query_string_after_trailing_slash() {
+        assert_eq!(parse_db_from_url("redis://127.0.0.1:6379/3/?timeout=5"), 3);
     }
 
     #[test]
