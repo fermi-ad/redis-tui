@@ -38,6 +38,48 @@ pub struct RedisClient {
     pub db: i64,
 }
 
+/// Extract the database number from a Redis URL, e.g. `redis://host:6379/3` -> 3.
+///
+/// Returns 0 when the URL carries no usable database component. Query strings and
+/// fragments are stripped first, so `redis://host/3?timeout=5` yields 3 rather than
+/// silently falling back to 0.
+fn parse_db_from_url(url: &str) -> i64 {
+    // Strip `?query` and `#fragment` before looking at the path.
+    let trimmed = url.split(['?', '#']).next().unwrap_or(url);
+
+    // Skip past `scheme://` so the authority's own separators aren't read as a path.
+    let after_scheme = match trimmed.find("://") {
+        Some(i) => &trimmed[i + 3..],
+        None => trimmed,
+    };
+
+    // The path begins at the first '/' after the authority. No '/' means no db given.
+    let Some((_, path)) = after_scheme.split_once('/') else {
+        return 0;
+    };
+
+    path.rsplit('/')
+        .next()
+        .and_then(|s| s.parse::<i64>().ok())
+        .filter(|db| *db >= 0)
+        .unwrap_or(0)
+}
+
+/// Validate a TTL before any command is sent to Redis.
+///
+/// Redis treats `EXPIRE key 0` as "expire immediately", which deletes the key. That is
+/// almost never what someone typing 0 into a TTL field means, so it is refused here
+/// rather than reinterpreted - no command reaches Redis.
+fn validate_ttl(ttl: i64, key: &str) -> Result<()> {
+    if ttl == 0 {
+        anyhow::bail!(
+            "TTL 0 would delete '{}'. Use -1 to persist, or delete the key explicitly.",
+            key
+        );
+    }
+    Ok(())
+}
+
 impl RedisClient {
     pub fn connect(url: &str) -> Result<Self> {
         let client = redis::Client::open(url)
@@ -47,16 +89,12 @@ impl RedisClient {
             .with_context(|| format!("Failed to connect to {}", url))?;
 
         // Parse db number from URL (e.g., redis://host:port/3)
-        let db = url
-            .rsplit('/')
-            .next()
-            .and_then(|s| s.parse::<i64>().ok())
-            .unwrap_or(0);
+        let db = parse_db_from_url(url);
 
         Ok(Self {
             connection,
             url: url.to_string(),
-            db: db as i64,
+            db,
         })
     }
 
@@ -69,7 +107,12 @@ impl RedisClient {
         Ok(())
     }
 
-    pub fn scan_keys(&mut self, pattern: &str) -> Result<Vec<String>> {
+    /// Scan keys matching `pattern`.
+    ///
+    /// Returns the decodable keys plus a count of keys that could not be read back as
+    /// UTF-8 strings. Those are unavoidably invisible in a text UI, but the count lets
+    /// the caller say so instead of silently showing fewer keys than Redis holds.
+    pub fn scan_keys(&mut self, pattern: &str) -> Result<(Vec<String>, usize)> {
         let iter: redis::Iter<String> = redis::cmd("SCAN")
             .cursor_arg(0)
             .arg("MATCH")
@@ -80,9 +123,17 @@ impl RedisClient {
             .iter(&mut self.connection)
             .context("Failed to SCAN keys")?;
 
-        let mut keys: Vec<String> = iter.filter_map(|r| r.ok()).collect();
+        let mut keys: Vec<String> = Vec::new();
+        let mut skipped = 0usize;
+        for result in iter {
+            match result {
+                Ok(key) => keys.push(key),
+                // Almost always a non-UTF-8 key name, which a text UI cannot display.
+                Err(_) => skipped += 1,
+            }
+        }
         keys.sort();
-        Ok(keys)
+        Ok((keys, skipped))
     }
 
     pub fn get_key_info(&mut self, key: &str) -> Result<KeyInfo> {
@@ -438,6 +489,7 @@ impl RedisClient {
     }
 
     pub fn set_ttl(&mut self, key: &str, ttl: i64) -> Result<()> {
+        validate_ttl(ttl, key)?;
         if ttl < 0 {
             let _: () = redis::cmd("PERSIST")
                 .arg(key)
@@ -576,15 +628,19 @@ impl MultiRedisClient {
         Ok(())
     }
 
-    pub fn scan_keys(&mut self, pattern: &str) -> Result<Vec<String>> {
+    /// Scan all hosts, returning the aggregated keys plus the total number of keys
+    /// skipped across hosts because they were not valid UTF-8.
+    pub fn scan_keys(&mut self, pattern: &str) -> Result<(Vec<String>, usize)> {
         let mut all_keys: Vec<String> = Vec::new();
         let mut seen: HashMap<String, Vec<usize>> = HashMap::new();
+        let mut total_skipped = 0usize;
         self.key_owner.clear();
         self.collisions.clear();
 
         for (idx, client) in self.clients.iter_mut().enumerate() {
             match client.scan_keys(pattern) {
-                Ok(keys) => {
+                Ok((keys, skipped)) => {
+                    total_skipped += skipped;
                     for key in keys {
                         seen.entry(key.clone()).or_default().push(idx);
                         if !self.key_owner.contains_key(&key) {
@@ -610,7 +666,7 @@ impl MultiRedisClient {
         self.collisions.sort_by(|a, b| a.0.cmp(&b.0));
 
         all_keys.sort();
-        Ok(all_keys)
+        Ok((all_keys, total_skipped))
     }
 
     /// Get the client that owns a key. Falls back to first client.
@@ -743,5 +799,284 @@ impl MultiRedisClient {
 
     pub fn host_count(&self) -> usize {
         self.clients.len()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use std::process::{Child, Command, Stdio};
+    use std::sync::atomic::{AtomicU16, Ordering};
+
+    /// Ports are handed out per-test because cargo runs tests in parallel; a single
+    /// hardcoded port would make these collide with each other and with any dev
+    /// instance already on 6379/6380.
+    static NEXT_PORT: AtomicU16 = AtomicU16::new(6390);
+
+    /// A throwaway redis-server that is killed when the test ends.
+    struct TestRedis {
+        child: Child,
+        port: u16,
+    }
+
+    impl TestRedis {
+        fn start() -> Self {
+            let port = NEXT_PORT.fetch_add(1, Ordering::SeqCst);
+            let child = Command::new("redis-server")
+                .args([
+                    "--port", &port.to_string(),
+                    "--save", "",
+                    "--appendonly", "no",
+                    "--loglevel", "warning",
+                ])
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn()
+                .expect("redis-server must be installed to run --ignored tests");
+
+            let server = TestRedis { child, port };
+            for _ in 0..100 {
+                if let Ok(c) = redis::Client::open(server.url().as_str()) {
+                    if c.get_connection().is_ok() {
+                        return server;
+                    }
+                }
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+            panic!("redis-server on port {} never became ready", port);
+        }
+
+        fn url(&self) -> String {
+            format!("redis://127.0.0.1:{}", self.port)
+        }
+    }
+
+    impl Drop for TestRedis {
+        fn drop(&mut self) {
+            let _ = self.child.kill();
+            let _ = self.child.wait();
+        }
+    }
+
+    // ---- #12: SCAN reports undecodable keys instead of hiding them ----
+
+    #[test]
+    #[ignore = "requires redis-server; run with: cargo test -- --ignored"]
+    fn scan_counts_keys_skipped_for_invalid_utf8() {
+        let server = TestRedis::start();
+        let mut client = RedisClient::connect(&server.url()).unwrap();
+
+        set_key(&mut client, "good:one", "v1");
+        set_key(&mut client, "good:two", "v2");
+        // 0xff 0xfe 0xfd is not valid UTF-8, so Iter<String> yields Err for it.
+        redis::cmd("SET")
+            .arg(&[0xffu8, 0xfe, 0xfd][..])
+            .arg("binary")
+            .exec(&mut client.connection)
+            .unwrap();
+
+        let (keys, skipped) = client.scan_keys("*").unwrap();
+
+        assert_eq!(keys, vec!["good:one".to_string(), "good:two".to_string()]);
+        assert_eq!(
+            skipped, 1,
+            "the non-UTF-8 key must be counted, not silently dropped"
+        );
+    }
+
+    #[test]
+    #[ignore = "requires redis-server; run with: cargo test -- --ignored"]
+    fn scan_reports_zero_skipped_when_all_keys_decode() {
+        let server = TestRedis::start();
+        let mut client = RedisClient::connect(&server.url()).unwrap();
+
+        set_key(&mut client, "good:one", "v1");
+
+        let (keys, skipped) = client.scan_keys("*").unwrap();
+
+        assert_eq!(keys.len(), 1);
+        assert_eq!(skipped, 0);
+    }
+
+    fn set_key(client: &mut RedisClient, key: &str, value: &str) {
+        redis::cmd("SET")
+            .arg(key)
+            .arg(value)
+            .exec(&mut client.connection)
+            .unwrap();
+    }
+
+    /// The DB the connection is actually on, straight from the server.
+    fn actual_db(client: &mut RedisClient) -> i64 {
+        let info: String = redis::cmd("CLIENT")
+            .arg("INFO")
+            .query(&mut client.connection)
+            .unwrap();
+        info.split_whitespace()
+            .find_map(|f| f.strip_prefix("db="))
+            .and_then(|v| v.parse().ok())
+            .unwrap()
+    }
+
+    #[test]
+    #[ignore = "requires redis-server; run with: cargo test -- --ignored"]
+    fn reported_db_matches_actual_db_with_query_string() {
+        let server = TestRedis::start();
+        // The redis crate honours the /3 path and connects to db 3 either way; the bug
+        // was that RedisClient::db reported 0, so the status bar lied about which
+        // database the user was looking at.
+        let url = format!("{}/3?timeout=5", server.url());
+        let mut client = RedisClient::connect(&url).unwrap();
+
+        assert_eq!(
+            actual_db(&mut client),
+            3,
+            "sanity: connection should be on db 3"
+        );
+        assert_eq!(client.db, 3, "reported db must match the real one");
+    }
+
+    #[test]
+    #[ignore = "requires redis-server; run with: cargo test -- --ignored"]
+    fn reported_db_matches_actual_db_without_path() {
+        let server = TestRedis::start();
+        let mut client = RedisClient::connect(&server.url()).unwrap();
+
+        assert_eq!(actual_db(&mut client), 0);
+        assert_eq!(client.db, 0);
+    }
+
+    /// End-to-end: the skipped count must reach the status line the user actually reads.
+    #[test]
+    #[ignore = "requires redis-server; run with: cargo test -- --ignored"]
+    fn refresh_keys_status_line_reports_skipped_keys() {
+        let server = TestRedis::start();
+        let mut seed = RedisClient::connect(&server.url()).unwrap();
+        set_key(&mut seed, "good:one", "v1");
+        set_key(&mut seed, "good:two", "v2");
+        redis::cmd("SET")
+            .arg(&[0xffu8, 0xfe, 0xfd][..])
+            .arg("binary")
+            .exec(&mut seed.connection)
+            .unwrap();
+        drop(seed);
+
+        let mut multi = MultiRedisClient::from_single(&server.url()).unwrap();
+        let mut app = crate::app::App::new();
+        app.refresh_keys(&mut multi);
+
+        assert_eq!(app.keys.len(), 2);
+        assert!(
+            app.status_message.contains("1 skipped"),
+            "status line should disclose the skipped key, got: {}",
+            app.status_message
+        );
+    }
+
+    // ---- #10: TTL validation ----
+
+    #[test]
+    fn ttl_zero_is_rejected() {
+        // EXPIRE key 0 deletes the key immediately; refuse before sending anything.
+        assert!(validate_ttl(0, "mykey").is_err());
+    }
+
+    #[test]
+    fn ttl_zero_error_names_the_key() {
+        let err = validate_ttl(0, "mykey").unwrap_err().to_string();
+        assert!(
+            err.contains("mykey"),
+            "error should name the key, got: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn ttl_negative_is_accepted_as_persist() {
+        assert!(validate_ttl(-1, "mykey").is_ok());
+    }
+
+    #[test]
+    fn ttl_positive_is_accepted() {
+        assert!(validate_ttl(60, "mykey").is_ok());
+    }
+
+    #[test]
+    #[ignore = "requires redis-server; run with: cargo test -- --ignored"]
+    fn set_ttl_zero_leaves_the_key_intact() {
+        let server = TestRedis::start();
+        let mut client = RedisClient::connect(&server.url()).unwrap();
+        set_key(&mut client, "keeper", "precious");
+
+        let result = client.set_ttl("keeper", 0);
+
+        assert!(result.is_err(), "TTL 0 must be refused");
+        let exists: bool = redis::cmd("EXISTS")
+            .arg("keeper")
+            .query(&mut client.connection)
+            .unwrap();
+        assert!(exists, "the key must still exist - no command should have been sent");
+    }
+
+    #[test]
+    #[ignore = "requires redis-server; run with: cargo test -- --ignored"]
+    fn set_ttl_positive_applies_expiry() {
+        let server = TestRedis::start();
+        let mut client = RedisClient::connect(&server.url()).unwrap();
+        set_key(&mut client, "temp", "v");
+
+        client.set_ttl("temp", 120).unwrap();
+
+        let ttl: i64 = redis::cmd("TTL")
+            .arg("temp")
+            .query(&mut client.connection)
+            .unwrap();
+        assert!(ttl > 0 && ttl <= 120, "expected a live ttl, got {}", ttl);
+    }
+
+    // ---- #9: DB number parsing from URL ----
+
+    #[test]
+    fn db_parses_from_plain_path() {
+        assert_eq!(parse_db_from_url("redis://127.0.0.1:6379/3"), 3);
+    }
+
+    #[test]
+    fn db_parses_with_query_string() {
+        // The original bug: rsplit('/') yields "3?timeout=5", which fails to parse.
+        assert_eq!(parse_db_from_url("redis://127.0.0.1:6379/3?timeout=5"), 3);
+    }
+
+    #[test]
+    fn db_parses_with_fragment() {
+        assert_eq!(parse_db_from_url("redis://127.0.0.1:6379/7#frag"), 7);
+    }
+
+    #[test]
+    fn db_defaults_to_zero_without_path() {
+        // No path component at all - must be 0 deliberately, not by parse failure.
+        assert_eq!(parse_db_from_url("redis://127.0.0.1:6379"), 0);
+    }
+
+    #[test]
+    fn db_defaults_to_zero_for_non_numeric_path() {
+        assert_eq!(parse_db_from_url("redis://127.0.0.1:6379/notanumber"), 0);
+    }
+
+    #[test]
+    fn db_parses_with_auth_in_url() {
+        assert_eq!(parse_db_from_url("redis://user:pw@127.0.0.1:6379/5"), 5);
+    }
+
+    #[test]
+    fn db_rejects_negative_number() {
+        // A negative DB is nonsense and would only fail later at SELECT.
+        assert_eq!(parse_db_from_url("redis://127.0.0.1:6379/-1"), 0);
+    }
+
+    #[test]
+    fn db_parses_with_empty_path() {
+        assert_eq!(parse_db_from_url("redis://127.0.0.1:6379/"), 0);
     }
 }
