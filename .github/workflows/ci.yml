@@ -6,10 +6,14 @@ on:
     branches: [main]
   workflow_dispatch:
 
-# A push to a PR branch triggers both `push` and `pull_request`. Superseded runs
-# on the same ref are cancelled rather than left to finish.
+# A push to a PR branch triggers both `push` and `pull_request`, and those two
+# events report different refs for the same branch - `refs/heads/<branch>` versus
+# `refs/pull/<n>/merge` - so keying on `github.ref` would put them in separate
+# groups and run the whole job twice. `head_ref` is set only for pull_request and
+# `ref_name` is the bare branch name, so this key is the branch either way and the
+# newer run cancels the older.
 concurrency:
-  group: ci-${{ github.workflow }}-${{ github.ref }}
+  group: ci-${{ github.workflow }}-${{ github.head_ref || github.ref_name }}
   cancel-in-progress: true
 
 env:
