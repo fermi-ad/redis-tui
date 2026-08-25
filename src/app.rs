@@ -182,6 +182,11 @@ pub enum InputMode {
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum PlotFocus {
     Signal,
+    // clippy suggests `Fft`. FFT is the universal spelling for this transform in
+    // signal-processing code, and it is spelled that way everywhere else here -
+    // fft_enabled, fft_dirty, the [f] binding, the FFT chart title. Renaming the
+    // variant alone would make it the odd one out and read worse at every call site.
+    #[allow(clippy::upper_case_acronyms)]
     FFT,
 }
 
