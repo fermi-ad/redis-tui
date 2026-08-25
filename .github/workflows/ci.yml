@@ -9,8 +9,10 @@ on:
   # covered here after merge.
   push:
     branches: [main]
+  # Deliberately unfiltered by base branch: a stacked PR targets its parent
+  # branch rather than main, and filtering on `branches: [main]` would leave it
+  # with no CI at all. There is no duplicate-run risk, since push is scoped above.
   pull_request:
-    branches: [main]
   workflow_dispatch:
 
 # Successive pushes to the same PR branch supersede each other. Keyed on the
