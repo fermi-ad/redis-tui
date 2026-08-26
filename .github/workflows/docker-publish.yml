@@ -135,13 +135,29 @@ jobs:
                      "$realm?service=${service}&scope=repository:${IMAGE#*/}:pull" 2>/dev/null)" || pcode="curl-failed"
           echo "  HTTP $pcode (200 here but not above => authentication fine, push permission missing)"
 
-      - name: Log in to Harbor
+      # NOT `docker login`. Harbor robot accounts are scoped to a project and
+      # cannot obtain the *unscoped* token that `docker login` requests to
+      # validate a credential, so login fails with "unauthorized" even when the
+      # account can push. Confirmed against this registry: a token request scoped
+      # to repository:instrumentation/redis-tui:pull,push returns 200, while the
+      # same credential with no scope returns 401.
+      #
+      # Writing the auth straight into the docker config skips that validation.
+      # The push itself requests a scoped token, which this account can get.
+      - name: Configure registry credentials
         if: env.REGISTRY_USERNAME != ''
-        uses: docker/login-action@v3
-        with:
-          registry: ${{ env.REGISTRY }}
-          username: ${{ secrets.ADREGISTRY_INST_USERNAME }}
-          password: ${{ secrets.ADREGISTRY_INST_SECRET }}
+        env:
+          REG_USER: ${{ secrets.ADREGISTRY_INST_USERNAME }}
+          REG_PASS: ${{ secrets.ADREGISTRY_INST_SECRET }}
+        run: |
+          set -uo pipefail
+          auth="$(printf '%s:%s' "$REG_USER" "$REG_PASS" | base64 -w0)"
+          # base64 of a secret is a derived value and is not masked automatically.
+          echo "::add-mask::$auth"
+          mkdir -p ~/.docker
+          printf '{"auths":{"%s":{"auth":"%s"}}}\n' "$REGISTRY" "$auth" > ~/.docker/config.json
+          chmod 600 ~/.docker/config.json
+          echo "Wrote credentials for $REGISTRY to ~/.docker/config.json"
 
       - name: Set image tags
         id: tags
