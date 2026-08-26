@@ -7,7 +7,10 @@ use anyhow::{Context, Result};
 use app::{App, InputMode, Panel};
 use clap::Parser;
 use crossterm::{
-    event::{self, Event, KeyCode, KeyModifiers, MouseEvent, MouseEventKind, EnableMouseCapture, DisableMouseCapture, EnableBracketedPaste, DisableBracketedPaste},
+    event::{
+        self, DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
+        Event, KeyCode, KeyModifiers, MouseEvent, MouseEventKind,
+    },
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
     ExecutableCommand,
 };
@@ -15,11 +18,17 @@ use ratatui::prelude::*;
 use redis_client::{MultiRedisClient, RedisClient, StreamEntry};
 use std::io;
 use std::sync::mpsc;
-use std::sync::{Arc, atomic::{AtomicBool, Ordering}};
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc,
+};
 use std::time::Duration;
 
 #[derive(Parser, Debug)]
-#[command(name = "redis-tui", about = "A Redis TUI client inspired by Redis Insight")]
+#[command(
+    name = "redis-tui",
+    about = "A Redis TUI client inspired by Redis Insight"
+)]
 struct Args {
     /// Redis host
     #[arg(long, default_value = "127.0.0.1")]
@@ -64,10 +73,7 @@ impl Args {
             Some(pw) => format!(":{}@", pw),
             None => String::new(),
         };
-        format!(
-            "redis://{}{}:{}/{}",
-            auth, self.host, self.port, self.db
-        )
+        format!("redis://{}{}:{}/{}", auth, self.host, self.port, self.db)
     }
 }
 
@@ -150,7 +156,12 @@ fn main() -> Result<()> {
     let mut terminal = Terminal::new(backend).context("Failed to create terminal")?;
 
     // Run app
-    let result = run_app(&mut terminal, &mut client, args.rate_history * 60, args.rate_avg_window);
+    let result = run_app(
+        &mut terminal,
+        &mut client,
+        args.rate_history * 60,
+        args.rate_avg_window,
+    );
 
     // Restore terminal
     disable_raw_mode().context("Failed to disable raw mode")?;
@@ -346,7 +357,10 @@ fn run_app(
                     // Otherwise: swallow the event entirely (don't let terminal see it)
                 } else if mouse.modifiers.contains(KeyModifiers::SHIFT) {
                     // Starting a new selection — only activate on drag/down
-                    if matches!(mouse.kind, MouseEventKind::Down(_) | MouseEventKind::Drag(_)) {
+                    if matches!(
+                        mouse.kind,
+                        MouseEventKind::Down(_) | MouseEventKind::Drag(_)
+                    ) {
                         shift_selecting = true;
                     }
                 } else {
@@ -398,143 +412,195 @@ fn run_app(
                 // Only handle key press events — ignore release/repeat to prevent
                 // input issues with crossterm 0.28+ terminal protocols
                 if key.kind == event::KeyEventKind::Press {
-                match app.input_mode {
-                    InputMode::Filter => handle_filter_input(&mut app, client, key.code),
-                    InputMode::Confirm => handle_confirm_input(&mut app, client, key.code),
-                    InputMode::Help => match key.code {
-                        KeyCode::Up => {
-                            app.help_scroll = app.help_scroll.saturating_sub(1);
-                        }
-                        KeyCode::Down => {
-                            app.help_scroll = app.help_scroll.saturating_add(1);
-                        }
-                        _ => {
-                            app.help_scroll = 0;
-                            app.input_mode = InputMode::Normal;
-                        }
-                    },
-                    InputMode::Edit => {
-                        handle_edit_input(&mut app, client, key.code, key.modifiers)
-                    }
-                    InputMode::PlotLimit => {
-                        handle_plot_limit_input(&mut app, key.code)
-                    }
-                    InputMode::SignalGen => {
-                        handle_signal_gen_input(&mut app, key.code);
-                        // Check if user pressed Enter to start the generator
-                        if app.input_mode == InputMode::Normal && app.status_message == "Signal gen: starting" {
-                            // Parse config and start generator
-                            let all_types = data::DataType::all();
-                            let config = app::SignalGenConfig {
-                                wave_type: app.signal_gen_wave_type().to_string(),
-                                data_type: all_types[app.signal_gen_dtype_idx],
-                                endianness: app.endianness,
-                                frequency: app.signal_gen_fields[0].1.trim().parse().unwrap_or(1.0),
-                                amplitude: app.signal_gen_fields[1].1.trim().parse().unwrap_or(1.0),
-                                noise: app.signal_gen_fields[2].1.trim().parse().unwrap_or(0.0),
-                                samples_per_entry: app.signal_gen_fields[3].1.trim().parse().unwrap_or(100),
-                                entries_per_sec: app.signal_gen_fields[4].1.trim().parse().unwrap_or(10.0),
-                            };
-                            if let Some(k) = app.selected_key_name().map(|s| s.to_string()) {
-                                let key_url = client.url_for_key(&k).to_string();
-                                if let Some(sg) = SignalGenerator::start(&key_url, &k, app.db, config) {
-                                    // Evict oldest if at capacity (non-blocking)
-                                    if signal_generators.len() >= app::MAX_PLOT_SLOTS {
-                                        let mut oldest = signal_generators.remove(0);
-                                        oldest.stop_flag.store(true, Ordering::Relaxed);
-                                        if let Some(h) = oldest.handle.take() {
-                                            std::thread::spawn(move || { let _ = h.join(); });
-                                        }
-                                    }
-                                    signal_generators.push(sg);
-                                    app.status_message = format!("Signal gen: running on '{}' ({}/{})", k, signal_generators.len(), app::MAX_PLOT_SLOTS);
-                                } else {
-                                    app.status_message = "Signal gen: failed to start".to_string();
-                                }
+                    match app.input_mode {
+                        InputMode::Filter => handle_filter_input(&mut app, client, key.code),
+                        InputMode::Confirm => handle_confirm_input(&mut app, client, key.code),
+                        InputMode::Help => match key.code {
+                            KeyCode::Up => {
+                                app.help_scroll = app.help_scroll.saturating_sub(1);
                             }
-                        }
-                    }
-                    InputMode::Normal => {
-                        handle_normal_input(&mut app, client, key.code, key.modifiers);
-
-                        // Toggle key in plot slots with 'p'
-                        if key.code == KeyCode::Char('p') {
-                            if let Some(k) = app.selected_key_name().map(|s| s.to_string()) {
-                                let added = app.toggle_plot_slot(&k);
-                                if added {
-                                    // Fetch value directly from Redis for this key
-                                    if let Ok(value) = client.get_value(&k) {
-                                        app.update_slot_data(&k, &value);
-                                    }
-                                    app.plot_visible = true;
-                                    app.status_message = format!("Plot: added '{}' ({}/{})", k, app.plot_slots.len(), app::MAX_PLOT_SLOTS);
-                                } else {
-                                    if app.plot_slots.is_empty() {
-                                        app.plot_visible = false;
-                                    }
-                                    app.status_message = format!("Plot: removed '{}'", k);
-                                }
+                            KeyCode::Down => {
+                                app.help_scroll = app.help_scroll.saturating_add(1);
                             }
+                            _ => {
+                                app.help_scroll = 0;
+                                app.input_mode = InputMode::Normal;
+                            }
+                        },
+                        InputMode::Edit => {
+                            handle_edit_input(&mut app, client, key.code, key.modifiers)
                         }
-
-                        // Toggle stream listener with 'l'
-                        if key.code == KeyCode::Char('l') && app.is_viewing_stream() {
-                            if let Some(k) = app.selected_key_name().map(|s| s.to_string()) {
-                                // Check if already listening on this key
-                                if let Some(idx) = stream_listeners.iter().position(|sl| sl.watching_key == k) {
-                                    // Stop this specific listener (non-blocking)
-                                    let mut sl = stream_listeners.remove(idx);
-                                    sl.stop_flag.store(true, Ordering::Relaxed);
-                                    if let Some(h) = sl.handle.take() {
-                                        std::thread::spawn(move || { let _ = h.join(); });
-                                    }
-                                    app.clear_rate_tracker(&k);
-                                    app.rate_view = false;
-                                    app.status_message = format!("Stream: stopped '{}'", k);
-                                } else {
-                                    // Start new listener
-                                    let lid = app.last_stream_id.clone().unwrap_or_else(|| "$".to_string());
+                        InputMode::PlotLimit => handle_plot_limit_input(&mut app, key.code),
+                        InputMode::SignalGen => {
+                            handle_signal_gen_input(&mut app, key.code);
+                            // Check if user pressed Enter to start the generator
+                            if app.input_mode == InputMode::Normal
+                                && app.status_message == "Signal gen: starting"
+                            {
+                                // Parse config and start generator
+                                let all_types = data::DataType::all();
+                                let config = app::SignalGenConfig {
+                                    wave_type: app.signal_gen_wave_type().to_string(),
+                                    data_type: all_types[app.signal_gen_dtype_idx],
+                                    endianness: app.endianness,
+                                    frequency: app.signal_gen_fields[0]
+                                        .1
+                                        .trim()
+                                        .parse()
+                                        .unwrap_or(1.0),
+                                    amplitude: app.signal_gen_fields[1]
+                                        .1
+                                        .trim()
+                                        .parse()
+                                        .unwrap_or(1.0),
+                                    noise: app.signal_gen_fields[2].1.trim().parse().unwrap_or(0.0),
+                                    samples_per_entry: app.signal_gen_fields[3]
+                                        .1
+                                        .trim()
+                                        .parse()
+                                        .unwrap_or(100),
+                                    entries_per_sec: app.signal_gen_fields[4]
+                                        .1
+                                        .trim()
+                                        .parse()
+                                        .unwrap_or(10.0),
+                                };
+                                if let Some(k) = app.selected_key_name().map(|s| s.to_string()) {
                                     let key_url = client.url_for_key(&k).to_string();
-                                    if let Some(sl) = StreamListener::start(&key_url, &k, &lid, app.db) {
+                                    if let Some(sg) =
+                                        SignalGenerator::start(&key_url, &k, app.db, config)
+                                    {
                                         // Evict oldest if at capacity (non-blocking)
-                                        if stream_listeners.len() >= app::MAX_PLOT_SLOTS {
-                                            let mut oldest = stream_listeners.remove(0);
+                                        if signal_generators.len() >= app::MAX_PLOT_SLOTS {
+                                            let mut oldest = signal_generators.remove(0);
                                             oldest.stop_flag.store(true, Ordering::Relaxed);
                                             if let Some(h) = oldest.handle.take() {
-                                                std::thread::spawn(move || { let _ = h.join(); });
+                                                std::thread::spawn(move || {
+                                                    let _ = h.join();
+                                                });
                                             }
                                         }
-                                        stream_listeners.push(sl);
-                                        app.status_message = format!("Stream: listening on '{}' ({}/{})", k, stream_listeners.len(), app::MAX_PLOT_SLOTS);
+                                        signal_generators.push(sg);
+                                        app.status_message = format!(
+                                            "Signal gen: running on '{}' ({}/{})",
+                                            k,
+                                            signal_generators.len(),
+                                            app::MAX_PLOT_SLOTS
+                                        );
+                                    } else {
+                                        app.status_message =
+                                            "Signal gen: failed to start".to_string();
                                     }
                                 }
                             }
                         }
+                        InputMode::Normal => {
+                            handle_normal_input(&mut app, client, key.code, key.modifiers);
 
-                        // Toggle signal generator with 'w'
-                        if key.code == KeyCode::Char('w') {
-                            if let Some(k) = app.selected_key_name().map(|s| s.to_string()) {
-                                // Check if already generating on this key
-                                if let Some(idx) = signal_generators.iter().position(|sg| sg.watching_key == k) {
-                                    // Non-blocking stop
-                                    let mut sg = signal_generators.remove(idx);
-                                    sg.stop_flag.store(true, Ordering::Relaxed);
-                                    if let Some(h) = sg.handle.take() {
-                                        std::thread::spawn(move || { let _ = h.join(); });
+                            // Toggle key in plot slots with 'p'
+                            if key.code == KeyCode::Char('p') {
+                                if let Some(k) = app.selected_key_name().map(|s| s.to_string()) {
+                                    let added = app.toggle_plot_slot(&k);
+                                    if added {
+                                        // Fetch value directly from Redis for this key
+                                        if let Ok(value) = client.get_value(&k) {
+                                            app.update_slot_data(&k, &value);
+                                        }
+                                        app.plot_visible = true;
+                                        app.status_message = format!(
+                                            "Plot: added '{}' ({}/{})",
+                                            k,
+                                            app.plot_slots.len(),
+                                            app::MAX_PLOT_SLOTS
+                                        );
+                                    } else {
+                                        if app.plot_slots.is_empty() {
+                                            app.plot_visible = false;
+                                        }
+                                        app.status_message = format!("Plot: removed '{}'", k);
                                     }
-                                    app.status_message = format!("Signal gen: stopped '{}'", k);
-                                } else if app.is_viewing_stream() {
-                                    app.start_signal_gen_popup();
-                                } else {
-                                    app.status_message = "Signal gen: select a stream key first".to_string();
                                 }
                             }
-                        }
 
-                        // No longer stop generators on key navigation — they run independently
+                            // Toggle stream listener with 'l'
+                            if key.code == KeyCode::Char('l') && app.is_viewing_stream() {
+                                if let Some(k) = app.selected_key_name().map(|s| s.to_string()) {
+                                    // Check if already listening on this key
+                                    if let Some(idx) =
+                                        stream_listeners.iter().position(|sl| sl.watching_key == k)
+                                    {
+                                        // Stop this specific listener (non-blocking)
+                                        let mut sl = stream_listeners.remove(idx);
+                                        sl.stop_flag.store(true, Ordering::Relaxed);
+                                        if let Some(h) = sl.handle.take() {
+                                            std::thread::spawn(move || {
+                                                let _ = h.join();
+                                            });
+                                        }
+                                        app.clear_rate_tracker(&k);
+                                        app.rate_view = false;
+                                        app.status_message = format!("Stream: stopped '{}'", k);
+                                    } else {
+                                        // Start new listener
+                                        let lid = app
+                                            .last_stream_id
+                                            .clone()
+                                            .unwrap_or_else(|| "$".to_string());
+                                        let key_url = client.url_for_key(&k).to_string();
+                                        if let Some(sl) =
+                                            StreamListener::start(&key_url, &k, &lid, app.db)
+                                        {
+                                            // Evict oldest if at capacity (non-blocking)
+                                            if stream_listeners.len() >= app::MAX_PLOT_SLOTS {
+                                                let mut oldest = stream_listeners.remove(0);
+                                                oldest.stop_flag.store(true, Ordering::Relaxed);
+                                                if let Some(h) = oldest.handle.take() {
+                                                    std::thread::spawn(move || {
+                                                        let _ = h.join();
+                                                    });
+                                                }
+                                            }
+                                            stream_listeners.push(sl);
+                                            app.status_message = format!(
+                                                "Stream: listening on '{}' ({}/{})",
+                                                k,
+                                                stream_listeners.len(),
+                                                app::MAX_PLOT_SLOTS
+                                            );
+                                        }
+                                    }
+                                }
+                            }
+
+                            // Toggle signal generator with 'w'
+                            if key.code == KeyCode::Char('w') {
+                                if let Some(k) = app.selected_key_name().map(|s| s.to_string()) {
+                                    // Check if already generating on this key
+                                    if let Some(idx) =
+                                        signal_generators.iter().position(|sg| sg.watching_key == k)
+                                    {
+                                        // Non-blocking stop
+                                        let mut sg = signal_generators.remove(idx);
+                                        sg.stop_flag.store(true, Ordering::Relaxed);
+                                        if let Some(h) = sg.handle.take() {
+                                            std::thread::spawn(move || {
+                                                let _ = h.join();
+                                            });
+                                        }
+                                        app.status_message = format!("Signal gen: stopped '{}'", k);
+                                    } else if app.is_viewing_stream() {
+                                        app.start_signal_gen_popup();
+                                    } else {
+                                        app.status_message =
+                                            "Signal gen: select a stream key first".to_string();
+                                    }
+                                }
+                            }
+
+                            // No longer stop generators on key navigation — they run independently
+                        }
                     }
-                }
-            } // if KeyEventKind::Press
+                } // if KeyEventKind::Press
             }
         }
 
@@ -567,13 +633,22 @@ fn run_app(
                 }
             }
             if total_new > 0 {
-                app.status_message = format!("Stream: +{} entries on '{}' (live)", total_new, listener.watching_key);
+                app.status_message = format!(
+                    "Stream: +{} entries on '{}' (live)",
+                    total_new, listener.watching_key
+                );
             }
         }
 
         // Sync active key indicators for UI
-        app.listening_keys = stream_listeners.iter().map(|sl| sl.watching_key.clone()).collect();
-        app.siggen_keys = signal_generators.iter().map(|sg| sg.watching_key.clone()).collect();
+        app.listening_keys = stream_listeners
+            .iter()
+            .map(|sl| sl.watching_key.clone())
+            .collect();
+        app.siggen_keys = signal_generators
+            .iter()
+            .map(|sg| sg.watching_key.clone())
+            .collect();
 
         if !app.running {
             // Disable mouse capture immediately so events don't queue
@@ -828,7 +903,10 @@ fn handle_edit_input(
         return;
     }
     // Ctrl+T: cycle binary data type
-    if code == KeyCode::Char('t') && modifiers.contains(KeyModifiers::CONTROL) && app.edit_binary_mode {
+    if code == KeyCode::Char('t')
+        && modifiers.contains(KeyModifiers::CONTROL)
+        && app.edit_binary_mode
+    {
         let all = data::DataType::all();
         // Skip String and Blob types (last two)
         let max_idx = all.len() - 2;
@@ -837,7 +915,10 @@ fn handle_edit_input(
         return;
     }
     // Ctrl+E: toggle endianness
-    if code == KeyCode::Char('e') && modifiers.contains(KeyModifiers::CONTROL) && app.edit_binary_mode {
+    if code == KeyCode::Char('e')
+        && modifiers.contains(KeyModifiers::CONTROL)
+        && app.edit_binary_mode
+    {
         app.endianness = app.endianness.toggle();
         app.status_message = format!("Endianness: {}", app.endianness);
         return;
@@ -927,38 +1008,34 @@ fn handle_signal_gen_input(app: &mut App, code: KeyCode) {
         KeyCode::BackTab => {
             app.signal_gen_prev_field();
         }
-        KeyCode::Left => {
-            match app.signal_gen_focus {
-                0 => {
-                    if app.signal_gen_wave_idx == 0 {
-                        app.signal_gen_wave_idx = app::WAVE_TYPES.len() - 1;
-                    } else {
-                        app.signal_gen_wave_idx -= 1;
-                    }
+        KeyCode::Left => match app.signal_gen_focus {
+            0 => {
+                if app.signal_gen_wave_idx == 0 {
+                    app.signal_gen_wave_idx = app::WAVE_TYPES.len() - 1;
+                } else {
+                    app.signal_gen_wave_idx -= 1;
                 }
-                1 => {
-                    let all = data::DataType::all();
-                    if app.signal_gen_dtype_idx == 0 {
-                        app.signal_gen_dtype_idx = all.len() - 1;
-                    } else {
-                        app.signal_gen_dtype_idx -= 1;
-                    }
-                }
-                _ => {}
             }
-        }
-        KeyCode::Right => {
-            match app.signal_gen_focus {
-                0 => {
-                    app.signal_gen_wave_idx = (app.signal_gen_wave_idx + 1) % app::WAVE_TYPES.len();
+            1 => {
+                let all = data::DataType::all();
+                if app.signal_gen_dtype_idx == 0 {
+                    app.signal_gen_dtype_idx = all.len() - 1;
+                } else {
+                    app.signal_gen_dtype_idx -= 1;
                 }
-                1 => {
-                    let all = data::DataType::all();
-                    app.signal_gen_dtype_idx = (app.signal_gen_dtype_idx + 1) % all.len();
-                }
-                _ => {}
             }
-        }
+            _ => {}
+        },
+        KeyCode::Right => match app.signal_gen_focus {
+            0 => {
+                app.signal_gen_wave_idx = (app.signal_gen_wave_idx + 1) % app::WAVE_TYPES.len();
+            }
+            1 => {
+                let all = data::DataType::all();
+                app.signal_gen_dtype_idx = (app.signal_gen_dtype_idx + 1) % all.len();
+            }
+            _ => {}
+        },
         KeyCode::Enter => {
             let freq: f64 = match app.signal_gen_fields[0].1.trim().parse::<f64>() {
                 Ok(v) if v > 0.0 && v.is_finite() => v,
@@ -1255,7 +1332,11 @@ mod tests {
     fn zero_freq_rejected() {
         let mut app = make_app_with_fields("0", "1.0", "0.0", "100", "10.0");
         submit(&mut app);
-        assert!(app.status_message.contains("cycles/entry"), "{}", app.status_message);
+        assert!(
+            app.status_message.contains("cycles/entry"),
+            "{}",
+            app.status_message
+        );
         assert_eq!(app.input_mode, InputMode::SignalGen);
     }
 
@@ -1263,28 +1344,44 @@ mod tests {
     fn negative_freq_rejected() {
         let mut app = make_app_with_fields("-1.0", "1.0", "0.0", "100", "10.0");
         submit(&mut app);
-        assert!(app.status_message.contains("cycles/entry"), "{}", app.status_message);
+        assert!(
+            app.status_message.contains("cycles/entry"),
+            "{}",
+            app.status_message
+        );
     }
 
     #[test]
     fn infinite_freq_rejected() {
         let mut app = make_app_with_fields("inf", "1.0", "0.0", "100", "10.0");
         submit(&mut app);
-        assert!(app.status_message.contains("cycles/entry"), "{}", app.status_message);
+        assert!(
+            app.status_message.contains("cycles/entry"),
+            "{}",
+            app.status_message
+        );
     }
 
     #[test]
     fn negative_infinite_freq_rejected() {
         let mut app = make_app_with_fields("-inf", "1.0", "0.0", "100", "10.0");
         submit(&mut app);
-        assert!(app.status_message.contains("cycles/entry"), "{}", app.status_message);
+        assert!(
+            app.status_message.contains("cycles/entry"),
+            "{}",
+            app.status_message
+        );
     }
 
     #[test]
     fn nan_freq_rejected() {
         let mut app = make_app_with_fields("NaN", "1.0", "0.0", "100", "10.0");
         submit(&mut app);
-        assert!(app.status_message.contains("cycles/entry"), "{}", app.status_message);
+        assert!(
+            app.status_message.contains("cycles/entry"),
+            "{}",
+            app.status_message
+        );
     }
 
     // --- amplitude ---
@@ -1293,7 +1390,11 @@ mod tests {
     fn nan_amp_rejected() {
         let mut app = make_app_with_fields("2.0", "NaN", "0.0", "100", "10.0");
         submit(&mut app);
-        assert!(app.status_message.contains("amplitude"), "{}", app.status_message);
+        assert!(
+            app.status_message.contains("amplitude"),
+            "{}",
+            app.status_message
+        );
         assert_eq!(app.input_mode, InputMode::SignalGen);
     }
 
@@ -1301,14 +1402,22 @@ mod tests {
     fn infinite_amp_rejected() {
         let mut app = make_app_with_fields("2.0", "inf", "0.0", "100", "10.0");
         submit(&mut app);
-        assert!(app.status_message.contains("amplitude"), "{}", app.status_message);
+        assert!(
+            app.status_message.contains("amplitude"),
+            "{}",
+            app.status_message
+        );
     }
 
     #[test]
     fn negative_infinite_amp_rejected() {
         let mut app = make_app_with_fields("2.0", "-inf", "0.0", "100", "10.0");
         submit(&mut app);
-        assert!(app.status_message.contains("amplitude"), "{}", app.status_message);
+        assert!(
+            app.status_message.contains("amplitude"),
+            "{}",
+            app.status_message
+        );
     }
 
     #[test]
@@ -1331,7 +1440,11 @@ mod tests {
     fn negative_noise_rejected() {
         let mut app = make_app_with_fields("2.0", "1.0", "-0.1", "100", "10.0");
         submit(&mut app);
-        assert!(app.status_message.contains("noise"), "{}", app.status_message);
+        assert!(
+            app.status_message.contains("noise"),
+            "{}",
+            app.status_message
+        );
         assert_eq!(app.input_mode, InputMode::SignalGen);
     }
 
@@ -1339,21 +1452,33 @@ mod tests {
     fn infinite_noise_rejected() {
         let mut app = make_app_with_fields("2.0", "1.0", "inf", "100", "10.0");
         submit(&mut app);
-        assert!(app.status_message.contains("noise"), "{}", app.status_message);
+        assert!(
+            app.status_message.contains("noise"),
+            "{}",
+            app.status_message
+        );
     }
 
     #[test]
     fn negative_infinite_noise_rejected() {
         let mut app = make_app_with_fields("2.0", "1.0", "-inf", "100", "10.0");
         submit(&mut app);
-        assert!(app.status_message.contains("noise"), "{}", app.status_message);
+        assert!(
+            app.status_message.contains("noise"),
+            "{}",
+            app.status_message
+        );
     }
 
     #[test]
     fn nan_noise_rejected() {
         let mut app = make_app_with_fields("2.0", "1.0", "NaN", "100", "10.0");
         submit(&mut app);
-        assert!(app.status_message.contains("noise"), "{}", app.status_message);
+        assert!(
+            app.status_message.contains("noise"),
+            "{}",
+            app.status_message
+        );
     }
 
     #[test]
@@ -1369,7 +1494,11 @@ mod tests {
     fn zero_samples_rejected() {
         let mut app = make_app_with_fields("2.0", "1.0", "0.0", "0", "10.0");
         submit(&mut app);
-        assert!(app.status_message.contains("samples/entry"), "{}", app.status_message);
+        assert!(
+            app.status_message.contains("samples/entry"),
+            "{}",
+            app.status_message
+        );
         assert_eq!(app.input_mode, InputMode::SignalGen);
     }
 
@@ -1377,7 +1506,11 @@ mod tests {
     fn oversized_samples_rejected() {
         let mut app = make_app_with_fields("2.0", "1.0", "0.0", "1000001", "10.0");
         submit(&mut app);
-        assert!(app.status_message.contains("samples/entry"), "{}", app.status_message);
+        assert!(
+            app.status_message.contains("samples/entry"),
+            "{}",
+            app.status_message
+        );
     }
 
     #[test]
@@ -1393,7 +1526,11 @@ mod tests {
     fn zero_rate_rejected() {
         let mut app = make_app_with_fields("2.0", "1.0", "0.0", "100", "0");
         submit(&mut app);
-        assert!(app.status_message.contains("entries/sec"), "{}", app.status_message);
+        assert!(
+            app.status_message.contains("entries/sec"),
+            "{}",
+            app.status_message
+        );
         assert_eq!(app.input_mode, InputMode::SignalGen);
     }
 
@@ -1401,27 +1538,43 @@ mod tests {
     fn negative_rate_rejected() {
         let mut app = make_app_with_fields("2.0", "1.0", "0.0", "100", "-1.0");
         submit(&mut app);
-        assert!(app.status_message.contains("entries/sec"), "{}", app.status_message);
+        assert!(
+            app.status_message.contains("entries/sec"),
+            "{}",
+            app.status_message
+        );
     }
 
     #[test]
     fn infinite_rate_rejected() {
         let mut app = make_app_with_fields("2.0", "1.0", "0.0", "100", "inf");
         submit(&mut app);
-        assert!(app.status_message.contains("entries/sec"), "{}", app.status_message);
+        assert!(
+            app.status_message.contains("entries/sec"),
+            "{}",
+            app.status_message
+        );
     }
 
     #[test]
     fn negative_infinite_rate_rejected() {
         let mut app = make_app_with_fields("2.0", "1.0", "0.0", "100", "-inf");
         submit(&mut app);
-        assert!(app.status_message.contains("entries/sec"), "{}", app.status_message);
+        assert!(
+            app.status_message.contains("entries/sec"),
+            "{}",
+            app.status_message
+        );
     }
 
     #[test]
     fn nan_rate_rejected() {
         let mut app = make_app_with_fields("2.0", "1.0", "0.0", "100", "NaN");
         submit(&mut app);
-        assert!(app.status_message.contains("entries/sec"), "{}", app.status_message);
+        assert!(
+            app.status_message.contains("entries/sec"),
+            "{}",
+            app.status_message
+        );
     }
 }

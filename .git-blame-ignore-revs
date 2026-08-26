@@ -1,0 +1,10 @@
+# Revisions to skip when running git blame - bulk mechanical rewrites only.
+#
+# Use locally with:
+#   git config blame.ignoreRevsFile .git-blame-ignore-revs
+#
+# GitHub reads this file automatically. Only add commits that change formatting
+# and nothing else.
+
+# Reformat with cargo fmt (rustfmt 1.9.0, 198 diffs -> 0)
+c461fa194966b5c09816621dae6553723e5c1e67

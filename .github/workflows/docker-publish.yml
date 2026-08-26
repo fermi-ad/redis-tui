@@ -14,7 +14,9 @@ jobs:
   build-and-push:
     runs-on: ubuntu-latest
     env:
-      HARBOR_USERNAME: ${{ secrets.HARBOR_USERNAME }}
+      # Mirrored into env so step-level `if:` can test it - secrets are not
+      # available directly in an `if:` expression.
+      REGISTRY_USERNAME: ${{ secrets.ADREGISTRY_INST_USERNAME }}
 
     steps:
       - name: Checkout
@@ -27,12 +29,12 @@ jobs:
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
 
       - name: Log in to Harbor
-        if: env.HARBOR_USERNAME != ''
+        if: env.REGISTRY_USERNAME != ''
         uses: docker/login-action@v3
         with:
           registry: ${{ env.REGISTRY }}
-          username: ${{ secrets.HARBOR_USERNAME }}
-          password: ${{ secrets.HARBOR_PASSWORD }}
+          username: ${{ secrets.ADREGISTRY_INST_USERNAME }}
+          password: ${{ secrets.ADREGISTRY_INST_SECRET }}
 
       - name: Set image tags
         id: tags
@@ -45,10 +47,19 @@ jobs:
             echo "tags=${{ env.IMAGE }}:latest,${{ env.IMAGE }}:${VERSION}" >> "$GITHUB_OUTPUT"
           fi
 
+      # `push` is gated on the same condition as the login above. Previously the
+      # login skipped itself when the credential was absent but this pushed
+      # unconditionally, so a missing secret surfaced as an `unauthorized` error
+      # after a full image build rather than as a clear skip.
       - name: Build and push
         uses: docker/build-push-action@v6
         with:
           context: .
-          push: true
+          push: ${{ env.REGISTRY_USERNAME != '' }}
           platforms: linux/amd64
           tags: ${{ steps.tags.outputs.tags }}
+
+      - name: Warn if the push was skipped
+        if: env.REGISTRY_USERNAME == ''
+        run: |
+          echo "::warning::ADREGISTRY_INST_USERNAME is not set - image was built but not pushed."

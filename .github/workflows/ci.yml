@@ -82,21 +82,13 @@ jobs:
         id: clippy
         run: cargo clippy --locked --all-targets -- -D warnings
 
-      # ---- Ratchet: reported, not enforced ----
-      #
-      # main still carries ~198 pre-existing rustfmt diffs that belong to no single
-      # change. Enforcing now would make CI red on every PR regardless of its
-      # contents, and reformatting the tree would bury real diffs in noise.
-      #
-      # To enforce, run `cargo fmt` in a commit of its own, add that SHA to
-      # .git-blame-ignore-revs, and delete the `continue-on-error` below. See #64.
-
-      - name: Format check (reported, not enforced)
+      # Enforced: the tree is formatted and stays that way. The bulk reformat is
+      # listed in .git-blame-ignore-revs so it does not pollute git blame.
+      - name: Format check
         id: fmt
-        continue-on-error: true
         run: cargo fmt --check
 
-      - name: Lint debt summary
+      - name: Lint summary
         if: always()
         run: |
           {
@@ -105,8 +97,7 @@ jobs:
             echo "| Check | Result | Enforced |"
             echo "| ----- | ------ | -------- |"
             echo "| Clippy | ${{ steps.clippy.outcome }} | yes |"
-            echo "| Format | ${{ steps.fmt.outcome }} | no |"
+            echo "| Format | ${{ steps.fmt.outcome }} | yes |"
             echo
-            echo "Build, tests and clippy are enforced. Format is reported only"
-            echo "while the pre-existing rustfmt debt is cleared - see issue #64."
+            echo "All checks are enforced: build, tests, clippy and format."
           } >> "$GITHUB_STEP_SUMMARY"
