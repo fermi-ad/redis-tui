@@ -1,4 +1,7 @@
-use crate::app::{App, EditOperation, InputMode, Panel, PlotFocus, RateTracker, RATE_WINDOWS, KEY_TYPES, WAVE_TYPES};
+use crate::app::{
+    App, EditOperation, InputMode, Panel, PlotFocus, RateTracker, KEY_TYPES, RATE_WINDOWS,
+    WAVE_TYPES,
+};
 use crate::data::DataType;
 use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
@@ -23,7 +26,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(1), // title bar
-            Constraint::Min(5),   // body
+            Constraint::Min(5),    // body
             Constraint::Length(1), // status bar
         ])
         .split(size);
@@ -52,14 +55,17 @@ fn draw_title_bar(frame: &mut Frame, app: &App, area: Rect) {
     // Split title bar into left (title/url/help) and right (version) so they never overlap
     let h_split = Layout::default()
         .direction(Direction::Horizontal)
-        .constraints([
-            Constraint::Min(0),
-            Constraint::Length(version_width),
-        ])
+        .constraints([Constraint::Min(0), Constraint::Length(version_width)])
         .split(area);
 
     let title = Line::from(vec![
-        Span::styled(" Redis TUI ", Style::default().fg(Color::White).bg(Color::Blue).add_modifier(Modifier::BOLD)),
+        Span::styled(
+            " Redis TUI ",
+            Style::default()
+                .fg(Color::White)
+                .bg(Color::Blue)
+                .add_modifier(Modifier::BOLD),
+        ),
         Span::raw(" "),
         Span::styled(url_text, Style::default().fg(Color::DarkGray)),
         Span::raw("  "),
@@ -67,7 +73,10 @@ fn draw_title_bar(frame: &mut Frame, app: &App, area: Rect) {
     ]);
     frame.render_widget(Paragraph::new(title), h_split[0]);
     frame.render_widget(
-        Paragraph::new(Line::from(Span::styled(version, Style::default().fg(Color::DarkGray)))),
+        Paragraph::new(Line::from(Span::styled(
+            version,
+            Style::default().fg(Color::DarkGray),
+        ))),
         h_split[1],
     );
 }
@@ -77,19 +86,13 @@ fn draw_body(frame: &mut Frame, app: &mut App, area: Rect) {
         // Vertical split: top row (keys + value) | bottom (full-width plot)
         let v_split = Layout::default()
             .direction(Direction::Vertical)
-            .constraints([
-                Constraint::Percentage(50),
-                Constraint::Percentage(50),
-            ])
+            .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
             .split(area);
 
         // Top row: key list | value/rate view side by side
         let h_split = Layout::default()
             .direction(Direction::Horizontal)
-            .constraints([
-                Constraint::Percentage(25),
-                Constraint::Percentage(75),
-            ])
+            .constraints([Constraint::Percentage(25), Constraint::Percentage(75)])
             .split(v_split[0]);
 
         draw_key_list(frame, app, h_split[0]);
@@ -105,10 +108,7 @@ fn draw_body(frame: &mut Frame, app: &mut App, area: Rect) {
         // No plot: full height for keys + value
         let h_split = Layout::default()
             .direction(Direction::Horizontal)
-            .constraints([
-                Constraint::Percentage(25),
-                Constraint::Percentage(75),
-            ])
+            .constraints([Constraint::Percentage(25), Constraint::Percentage(75)])
             .split(area);
 
         draw_key_list(frame, app, h_split[0]);
@@ -128,16 +128,10 @@ fn draw_key_list(frame: &mut Frame, app: &mut App, area: Rect) {
         BORDER_INACTIVE
     };
 
-    let title = format!(
-        " Keys ({}) [/]Filter [r]Refresh ",
-        app.keys.len()
-    );
+    let title = format!(" Keys ({}) [/]Filter [r]Refresh ", app.keys.len());
 
-    let collision_keys: std::collections::HashSet<&str> = app
-        .collisions
-        .iter()
-        .map(|(k, _)| k.as_str())
-        .collect();
+    let collision_keys: std::collections::HashSet<&str> =
+        app.collisions.iter().map(|(k, _)| k.as_str()).collect();
 
     let items: Vec<ListItem> = app
         .keys
@@ -154,12 +148,10 @@ fn draw_key_list(frame: &mut Frame, app: &mut App, area: Rect) {
             let plot_color = app.plot_color_for_key(key);
             let is_listening = app.listening_keys.iter().any(|k| k == key);
             let is_siggen = app.siggen_keys.iter().any(|k| k == key);
-            let mut spans = vec![
-                Span::styled(
-                    format!("{:<6}", type_badge.0),
-                    Style::default().fg(type_badge.1),
-                ),
-            ];
+            let mut spans = vec![Span::styled(
+                format!("{:<6}", type_badge.0),
+                Style::default().fg(type_badge.1),
+            )];
             // Indicators: P=plotting, L=listening, W=signal gen
             if let Some(color) = plot_color {
                 spans.push(Span::styled("P", Style::default().fg(color)));
@@ -218,7 +210,12 @@ fn draw_value_view(frame: &mut Frame, app: &mut App, area: Rect) {
     if let Some(info) = &app.current_key_info {
         lines.push(Line::from(vec![
             Span::styled("Key: ", Style::default().fg(Color::Yellow)),
-            Span::styled(&info.name, Style::default().fg(Color::White).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                &info.name,
+                Style::default()
+                    .fg(Color::White)
+                    .add_modifier(Modifier::BOLD),
+            ),
         ]));
         lines.push(Line::from(vec![
             Span::styled("Type: ", Style::default().fg(Color::Yellow)),
@@ -250,7 +247,11 @@ fn draw_value_view(frame: &mut Frame, app: &mut App, area: Rect) {
 
     // Ingestion rate summary — shown for stream keys being actively listened to
     if let Some(key) = app.selected_key_name() {
-        let is_stream = app.current_key_info.as_ref().map(|i| i.key_type == "stream").unwrap_or(false);
+        let is_stream = app
+            .current_key_info
+            .as_ref()
+            .map(|i| i.key_type == "stream")
+            .unwrap_or(false);
         if is_stream && app.listening_keys.iter().any(|k| k == key) {
             if let Some(tracker) = app.rate_trackers.get(key) {
                 let now_ms = std::time::SystemTime::now()
@@ -267,12 +268,19 @@ fn draw_value_view(frame: &mut Frame, app: &mut App, area: Rect) {
                 let mut spans = vec![Span::styled("Rate: ", label_style)];
                 for (i, (_, window_label)) in RATE_WINDOWS.iter().enumerate() {
                     spans.push(Span::styled(format!("{}:", window_label), dim));
-                    spans.push(Span::styled(format!("{:>1$.1}  ", tracker.rate_display_vals[i], rate_w), val_style));
+                    spans.push(Span::styled(
+                        format!("{:>1$.1}  ", tracker.rate_display_vals[i], rate_w),
+                        val_style,
+                    ));
                 }
                 spans.push(Span::styled("/s", dim));
                 if gap_count > 0 {
                     spans.push(Span::styled(
-                        format!("  ⚠ {} gap{}", gap_count, if gap_count == 1 { "" } else { "s" }),
+                        format!(
+                            "  ⚠ {} gap{}",
+                            gap_count,
+                            if gap_count == 1 { "" } else { "s" }
+                        ),
                         Style::default().fg(Color::Red),
                     ));
                 }
@@ -285,11 +293,16 @@ fn draw_value_view(frame: &mut Frame, app: &mut App, area: Rect) {
                         let [min, q1, med, q3, max] = tracker.stat_display_vals;
                         lines.push(Line::from(vec![
                             Span::styled("Stats: ", label_style),
-                            Span::styled("Min:", dim), Span::styled(format!("{:>1$.1}  ", min, stat_w), val_style),
-                            Span::styled("Q1:", dim),  Span::styled(format!("{:>1$.1}  ", q1,  stat_w), val_style),
-                            Span::styled("Med:", dim), Span::styled(format!("{:>1$.1}  ", med, stat_w), val_style),
-                            Span::styled("Q3:", dim),  Span::styled(format!("{:>1$.1}  ", q3,  stat_w), val_style),
-                            Span::styled("Max:", dim), Span::styled(format!("{:>1$.1}", max, stat_w), val_style),
+                            Span::styled("Min:", dim),
+                            Span::styled(format!("{:>1$.1}  ", min, stat_w), val_style),
+                            Span::styled("Q1:", dim),
+                            Span::styled(format!("{:>1$.1}  ", q1, stat_w), val_style),
+                            Span::styled("Med:", dim),
+                            Span::styled(format!("{:>1$.1}  ", med, stat_w), val_style),
+                            Span::styled("Q3:", dim),
+                            Span::styled(format!("{:>1$.1}  ", q3, stat_w), val_style),
+                            Span::styled("Max:", dim),
+                            Span::styled(format!("{:>1$.1}", max, stat_w), val_style),
                             Span::styled("  /s", dim),
                         ]));
                     }
@@ -325,7 +338,11 @@ fn draw_value_view(frame: &mut Frame, app: &mut App, area: Rect) {
         " Value [t]{} [e]{} {}",
         app.data_type,
         app.endianness,
-        if app.active_panel == Panel::ValueView { "[Up/Down]Scroll" } else { "" }
+        if app.active_panel == Panel::ValueView {
+            "[Up/Down]Scroll"
+        } else {
+            ""
+        }
     );
 
     let paragraph = Paragraph::new(lines)
@@ -350,7 +367,8 @@ fn draw_rate_view(frame: &mut Frame, app: &App, area: Rect) {
 
     let key_name = app.selected_key_name().map(|s| s.to_string());
 
-    let has_data = key_name.as_ref()
+    let has_data = key_name
+        .as_ref()
         .and_then(|k| app.rate_trackers.get(k))
         .map(|t| !t.rate_history.is_empty())
         .unwrap_or(false);
@@ -389,7 +407,11 @@ fn draw_rate_view(frame: &mut Frame, app: &App, area: Rect) {
     let total = tracker.total_entries;
 
     let gap_label = if gap_count > 0 {
-        format!("  | {} gap{}", gap_count, if gap_count == 1 { "" } else { "s" })
+        format!(
+            "  | {} gap{}",
+            gap_count,
+            if gap_count == 1 { "" } else { "s" }
+        )
     } else {
         String::new()
     };
@@ -422,7 +444,10 @@ fn draw_rate_view(frame: &mut Frame, app: &App, area: Rect) {
     let mut avg_spans = vec![Span::styled("Avg: ", dim)];
     for (i, (_, label)) in RATE_WINDOWS.iter().enumerate() {
         avg_spans.push(Span::styled(format!("{}:", label), dim));
-        avg_spans.push(Span::styled(format!("{:>1$.1}  ", tracker.rate_display_vals[i], rate_w), val_style));
+        avg_spans.push(Span::styled(
+            format!("{:>1$.1}  ", tracker.rate_display_vals[i], rate_w),
+            val_style,
+        ));
     }
     avg_spans.push(Span::styled("/s", dim));
 
@@ -434,11 +459,16 @@ fn draw_rate_view(frame: &mut Frame, app: &App, area: Rect) {
             Line::from(avg_spans),
             Line::from(vec![
                 Span::styled("Stats: ", dim),
-                Span::styled("Min:", dim), Span::styled(format!("{:>1$.1}  ", min, stat_w), val_style),
-                Span::styled("Q1:", dim),  Span::styled(format!("{:>1$.1}  ", q1,  stat_w), val_style),
-                Span::styled("Med:", dim), Span::styled(format!("{:>1$.1}  ", med, stat_w), val_style),
-                Span::styled("Q3:", dim),  Span::styled(format!("{:>1$.1}  ", q3,  stat_w), val_style),
-                Span::styled("Max:", dim), Span::styled(format!("{:>1$.1}", max, stat_w), val_style),
+                Span::styled("Min:", dim),
+                Span::styled(format!("{:>1$.1}  ", min, stat_w), val_style),
+                Span::styled("Q1:", dim),
+                Span::styled(format!("{:>1$.1}  ", q1, stat_w), val_style),
+                Span::styled("Med:", dim),
+                Span::styled(format!("{:>1$.1}  ", med, stat_w), val_style),
+                Span::styled("Q3:", dim),
+                Span::styled(format!("{:>1$.1}  ", q3, stat_w), val_style),
+                Span::styled("Max:", dim),
+                Span::styled(format!("{:>1$.1}", max, stat_w), val_style),
                 Span::styled("  /s", dim),
             ]),
         ]
@@ -472,19 +502,21 @@ fn draw_rate_view(frame: &mut Frame, app: &App, area: Rect) {
         .filter_map(|&gap_ms| {
             let secs_ago = (now_ms.saturating_sub(gap_ms)) as f64 / 1000.0;
             let x = history_window_secs - secs_ago;
-            if x >= 0.0 { Some(x) } else { None }
+            if x >= 0.0 {
+                Some(x)
+            } else {
+                None
+            }
         })
         .flat_map(|x| (0u32..=10).map(move |i| (x, y_max * i as f64 / 10.0)))
         .collect();
 
-    let mut datasets = vec![
-        Dataset::default()
-            .name(format!("entries/s ({}s avg)", chart_window))
-            .marker(safe_marker(chart_area))
-            .graph_type(GraphType::Line)
-            .style(Style::default().fg(Color::Cyan))
-            .data(&rate_points),
-    ];
+    let mut datasets = vec![Dataset::default()
+        .name(format!("entries/s ({}s avg)", chart_window))
+        .marker(safe_marker(chart_area))
+        .graph_type(GraphType::Line)
+        .style(Style::default().fg(Color::Cyan))
+        .data(&rate_points)];
     if !gap_points.is_empty() {
         datasets.push(
             Dataset::default()
@@ -504,7 +536,11 @@ fn draw_rate_view(frame: &mut Frame, app: &App, area: Rect) {
             } else if secs_ago >= 60.0 {
                 let m = (secs_ago / 60.0) as u64;
                 let s = secs_ago as u64 % 60;
-                if s == 0 { format!("-{}m", m) } else { format!("-{}m{:02}s", m, s) }
+                if s == 0 {
+                    format!("-{}m", m)
+                } else {
+                    format!("-{}m{:02}s", m, s)
+                }
             } else {
                 format!("-{}s", secs_ago as u64)
             };
@@ -519,7 +555,9 @@ fn draw_rate_view(frame: &mut Frame, app: &App, area: Rect) {
         })
         .collect();
 
-    let x_axis = Axis::default().bounds([0.0, history_window_secs]).labels(x_labels);
+    let x_axis = Axis::default()
+        .bounds([0.0, history_window_secs])
+        .labels(x_labels);
     let y_axis = Axis::default().bounds([0.0, y_max]).labels(y_labels);
 
     let chart = Chart::new(datasets).x_axis(x_axis).y_axis(y_axis);
@@ -534,17 +572,37 @@ fn draw_data_plot(frame: &mut Frame, app: &mut App, area: Rect) {
     };
 
     let focused_limits = match app.plot_focus {
-        PlotFocus::Signal => if app.plot_auto_limits { "auto" } else { "manual" },
-        PlotFocus::FFT => if app.fft_auto_limits { "auto" } else { "manual" },
+        PlotFocus::Signal => {
+            if app.plot_auto_limits {
+                "auto"
+            } else {
+                "manual"
+            }
+        }
+        PlotFocus::FFT => {
+            if app.fft_auto_limits {
+                "auto"
+            } else {
+                "manual"
+            }
+        }
     };
     let fft_label = if app.fft_enabled { "ON" } else { "OFF" };
-    let log_label = if app.fft_enabled && app.fft_log_scale { " [g]log" } else if app.fft_enabled { " [g]linear" } else { "" };
+    let log_label = if app.fft_enabled && app.fft_log_scale {
+        " [g]log"
+    } else if app.fft_enabled {
+        " [g]linear"
+    } else {
+        ""
+    };
     let focus_label = if app.fft_enabled {
         match app.plot_focus {
             PlotFocus::Signal => " [Signal]",
             PlotFocus::FFT => " [FFT]",
         }
-    } else { "" };
+    } else {
+        ""
+    };
     let title = format!(
         " Plot [a]{} [f]FFT:{}{}{}",
         focused_limits, fft_label, log_label, focus_label
@@ -611,7 +669,13 @@ fn safe_marker(area: Rect) -> symbols::Marker {
     }
 }
 
-fn draw_signal_chart(frame: &mut Frame, app: &mut App, area: Rect, title: &str, border_color: Color) {
+fn draw_signal_chart(
+    frame: &mut Frame,
+    app: &mut App,
+    area: Rect,
+    title: &str,
+    border_color: Color,
+) {
     if area.width < 12 || area.height < 5 {
         return;
     }
@@ -636,15 +700,25 @@ fn draw_signal_chart(frame: &mut Frame, app: &mut App, area: Rect, title: &str, 
         .plot_slots
         .iter()
         .map(|slot| {
-            let auto_min = slot.data.iter().copied()
+            let auto_min = slot
+                .data
+                .iter()
+                .copied()
                 .filter(|v| v.is_finite())
                 .fold(f64::INFINITY, f64::min);
-            let auto_max = slot.data.iter().copied()
+            let auto_max = slot
+                .data
+                .iter()
+                .copied()
                 .filter(|v| v.is_finite())
                 .fold(f64::NEG_INFINITY, f64::max);
             // Use per-slot limits if set, otherwise auto
-            let y_min = slot.y_min.unwrap_or(if auto_min.is_finite() { auto_min } else { 0.0 });
-            let y_max = slot.y_max.unwrap_or(if auto_max.is_finite() { auto_max } else { 1.0 });
+            let y_min = slot
+                .y_min
+                .unwrap_or(if auto_min.is_finite() { auto_min } else { 0.0 });
+            let y_max = slot
+                .y_max
+                .unwrap_or(if auto_max.is_finite() { auto_max } else { 1.0 });
             let points = if normalize {
                 let range = y_max - y_min;
                 let safe_range = if range == 0.0 { 1.0 } else { range };
@@ -657,14 +731,24 @@ fn draw_signal_chart(frame: &mut Frame, app: &mut App, area: Rect, title: &str, 
                     })
                     .collect()
             } else {
-                slot.data.iter().enumerate().map(|(i, v)| (i as f64, *v)).collect()
+                slot.data
+                    .iter()
+                    .enumerate()
+                    .map(|(i, v)| (i as f64, *v))
+                    .collect()
             };
-            SlotRender { points, y_min, y_max }
+            SlotRender {
+                points,
+                y_min,
+                y_max,
+            }
         })
         .collect();
 
     let (x_lo, x_hi) = if !app.plot_slots.is_empty() {
-        let max_len = app.plot_slots.iter()
+        let max_len = app
+            .plot_slots
+            .iter()
             .map(|s| s.data.len())
             .max()
             .unwrap_or(0)
@@ -690,8 +774,12 @@ fn draw_signal_chart(frame: &mut Frame, app: &mut App, area: Rect, title: &str, 
             (y_min, y_max)
         } else {
             // Auto: use actual data bounds
-            let all_data: Vec<f64> = slot.data.iter().copied()
-                .filter(|v| v.is_finite()).collect();
+            let all_data: Vec<f64> = slot
+                .data
+                .iter()
+                .copied()
+                .filter(|v| v.is_finite())
+                .collect();
             if all_data.is_empty() {
                 (0.0, 1.0)
             } else {
@@ -753,12 +841,14 @@ fn draw_signal_chart(frame: &mut Frame, app: &mut App, area: Rect, title: &str, 
     let mut datasets = Vec::new();
     if app.plot_slots.is_empty() {
         // Fallback: single dataset from primary plot_data
-        datasets.push(Dataset::default()
-            .name(format!("{} values", app.plot_data.len()))
-            .marker(marker)
-            .graph_type(GraphType::Line)
-            .style(Style::default().fg(Color::Cyan))
-            .data(&primary_points));
+        datasets.push(
+            Dataset::default()
+                .name(format!("{} values", app.plot_data.len()))
+                .marker(marker)
+                .graph_type(GraphType::Line)
+                .style(Style::default().fg(Color::Cyan))
+                .data(&primary_points),
+        );
     } else {
         for (i, slot) in app.plot_slots.iter().enumerate() {
             if !slot.data.is_empty() {
@@ -769,13 +859,18 @@ fn draw_signal_chart(frame: &mut Frame, app: &mut App, area: Rect, title: &str, 
                 } else {
                     slot.key_name.clone()
                 };
-                let legend_name = format!("{} {} [{:.0}..{:.0}]", short_name, slot.data_type, sr.y_min, sr.y_max);
-                datasets.push(Dataset::default()
-                    .name(legend_name)
-                    .marker(marker)
-                    .graph_type(GraphType::Line)
-                    .style(Style::default().fg(slot.color))
-                    .data(&sr.points));
+                let legend_name = format!(
+                    "{} {} [{:.0}..{:.0}]",
+                    short_name, slot.data_type, sr.y_min, sr.y_max
+                );
+                datasets.push(
+                    Dataset::default()
+                        .name(legend_name)
+                        .marker(marker)
+                        .graph_type(GraphType::Line)
+                        .style(Style::default().fg(slot.color))
+                        .data(&sr.points),
+                );
             }
         }
     }
@@ -799,9 +894,11 @@ fn draw_signal_chart(frame: &mut Frame, app: &mut App, area: Rect, title: &str, 
         )
         .y_axis(if app.plot_slots.len() > 1 {
             // Multi-key: hide default Y-axis labels, we'll draw per-key ones
-            Axis::default()
-                .bounds([y_lo, y_hi])
-                .labels(vec![Line::from(""), Line::from(""), Line::from("")])
+            Axis::default().bounds([y_lo, y_hi]).labels(vec![
+                Line::from(""),
+                Line::from(""),
+                Line::from(""),
+            ])
         } else {
             Axis::default()
                 .title("Value")
@@ -837,13 +934,14 @@ fn draw_signal_chart(frame: &mut Frame, app: &mut App, area: Rect, title: &str, 
         for (i, sr) in slot_renders.iter().enumerate().take(num_slots) {
             let color = app.plot_slots[i].color;
             let col_x = inner.x + (i as u16) * label_width;
-            if col_x + label_width > buf_area.width { break; }
+            if col_x + label_width > buf_area.width {
+                break;
+            }
 
             // Top: Y max
             if chart_y > 0 && chart_y < buf_area.height {
                 frame.render_widget(
-                    Paragraph::new(format!("{:.1}", sr.y_max))
-                        .style(Style::default().fg(color)),
+                    Paragraph::new(format!("{:.1}", sr.y_max)).style(Style::default().fg(color)),
                     Rect::new(col_x, chart_y, label_width, 1),
                 );
             }
@@ -852,8 +950,7 @@ fn draw_signal_chart(frame: &mut Frame, app: &mut App, area: Rect, title: &str, 
             if mid_y < buf_area.height {
                 let mid_val = (sr.y_min + sr.y_max) / 2.0;
                 frame.render_widget(
-                    Paragraph::new(format!("{:.1}", mid_val))
-                        .style(Style::default().fg(color)),
+                    Paragraph::new(format!("{:.1}", mid_val)).style(Style::default().fg(color)),
                     Rect::new(col_x, mid_y, label_width, 1),
                 );
             }
@@ -861,8 +958,7 @@ fn draw_signal_chart(frame: &mut Frame, app: &mut App, area: Rect, title: &str, 
             let bot_y = chart_y + chart_h.saturating_sub(1);
             if bot_y < buf_area.height && bot_y != mid_y {
                 frame.render_widget(
-                    Paragraph::new(format!("{:.1}", sr.y_min))
-                        .style(Style::default().fg(color)),
+                    Paragraph::new(format!("{:.1}", sr.y_min)).style(Style::default().fg(color)),
                     Rect::new(col_x, bot_y, label_width, 1),
                 );
             }
@@ -877,7 +973,12 @@ fn draw_signal_chart(frame: &mut Frame, app: &mut App, area: Rect, title: &str, 
                 Rect::new(chart_x, chart_y, chart_w, chart_h),
                 hx,
                 hy,
-                ChartBounds { x_lo, x_hi, y_lo, y_hi },
+                ChartBounds {
+                    x_lo,
+                    x_hi,
+                    y_lo,
+                    y_hi,
+                },
             );
         }
     }
@@ -897,37 +998,56 @@ fn draw_fft_chart(frame: &mut Frame, app: &mut App, area: Rect, _border_color: C
         .collect();
 
     // Compute FFT per slot
-    let slot_fft_data: Vec<Vec<f64>> = app.plot_slots.iter().map(|slot| {
-        let mut magnitudes = crate::app::compute_fft_magnitude(&slot.data);
-        if app.fft_log_scale {
-            for v in &mut magnitudes {
-                *v = if *v > 0.0 { v.log10() } else { -10.0 };
+    let slot_fft_data: Vec<Vec<f64>> = app
+        .plot_slots
+        .iter()
+        .map(|slot| {
+            let mut magnitudes = crate::app::compute_fft_magnitude(&slot.data);
+            if app.fft_log_scale {
+                for v in &mut magnitudes {
+                    *v = if *v > 0.0 { v.log10() } else { -10.0 };
+                }
             }
-        }
-        magnitudes
-    }).collect();
-    let slot_fft_points: Vec<Vec<(f64, f64)>> = slot_fft_data.iter().map(|data| {
-        data.iter().enumerate().map(|(i, v)| (i as f64, *v)).collect()
-    }).collect();
+            magnitudes
+        })
+        .collect();
+    let slot_fft_points: Vec<Vec<(f64, f64)>> = slot_fft_data
+        .iter()
+        .map(|data| {
+            data.iter()
+                .enumerate()
+                .map(|(i, v)| (i as f64, *v))
+                .collect()
+        })
+        .collect();
 
     // Compute unified bounds across all FFT data
     let (x_lo, x_hi) = if !app.plot_slots.is_empty() {
-        let max_bins = slot_fft_data.iter().map(|d| d.len()).max().unwrap_or(0)
+        let max_bins = slot_fft_data
+            .iter()
+            .map(|d| d.len())
+            .max()
+            .unwrap_or(0)
             .max(display_data.len());
-        if app.fft_x_max > 0.0 { (app.fft_x_min, app.fft_x_max) }
-        else { (0.0, max_bins as f64) }
+        if app.fft_x_max > 0.0 {
+            (app.fft_x_min, app.fft_x_max)
+        } else {
+            (0.0, max_bins as f64)
+        }
     } else {
         app.fft_x_bounds()
     };
 
     let (y_lo, y_hi) = if app.fft_auto_limits {
-        let all_fft: Vec<f64> = slot_fft_data.iter()
+        let all_fft: Vec<f64> = slot_fft_data
+            .iter()
             .flat_map(|d| d.iter().copied())
             .chain(display_data.iter().copied())
             .filter(|v| v.is_finite())
             .collect();
-        if all_fft.is_empty() { (0.0, 1.0) }
-        else {
+        if all_fft.is_empty() {
+            (0.0, 1.0)
+        } else {
             let y_min = all_fft.iter().copied().fold(f64::INFINITY, f64::min);
             let y_max = all_fft.iter().copied().fold(f64::NEG_INFINITY, f64::max);
             let range = y_max - y_min;
@@ -938,43 +1058,61 @@ fn draw_fft_chart(frame: &mut Frame, app: &mut App, area: Rect, _border_color: C
         (app.fft_y_min, app.fft_y_max)
     };
 
-    let chart_border = if app.plot_focus == PlotFocus::FFT { Color::Cyan } else { Color::DarkGray };
+    let chart_border = if app.plot_focus == PlotFocus::FFT {
+        Color::Cyan
+    } else {
+        Color::DarkGray
+    };
 
     let scale_label = if app.fft_log_scale { "log" } else { "linear" };
     let hover_suffix = if app.hover_in_fft {
         if let (Some(hx), Some(hy)) = (app.hover_data_x, app.hover_data_y) {
             format!(" bin:{:.1} mag:{:.2}", hx, hy)
-        } else { String::new() }
-    } else { String::new() };
+        } else {
+            String::new()
+        }
+    } else {
+        String::new()
+    };
     let fft_title = format!(" FFT Magnitude ({}){} ", scale_label, hover_suffix);
 
     let marker = safe_marker(area);
     let mut datasets = Vec::new();
 
     if app.plot_slots.is_empty() {
-        datasets.push(Dataset::default()
-            .name(format!("{} bins", display_data.len()))
-            .marker(marker)
-            .graph_type(GraphType::Line)
-            .style(Style::default().fg(Color::Yellow))
-            .data(&primary_fft_points));
+        datasets.push(
+            Dataset::default()
+                .name(format!("{} bins", display_data.len()))
+                .marker(marker)
+                .graph_type(GraphType::Line)
+                .style(Style::default().fg(Color::Yellow))
+                .data(&primary_fft_points),
+        );
     } else {
         for (i, slot) in app.plot_slots.iter().enumerate() {
             if i < slot_fft_points.len() && !slot_fft_points[i].is_empty() {
                 let short_name = if slot.key_name.len() > 12 {
                     format!("{}...", &slot.key_name[..12])
-                } else { slot.key_name.clone() };
-                datasets.push(Dataset::default()
-                    .name(short_name)
-                    .marker(marker)
-                    .graph_type(GraphType::Line)
-                    .style(Style::default().fg(slot.color))
-                    .data(&slot_fft_points[i]));
+                } else {
+                    slot.key_name.clone()
+                };
+                datasets.push(
+                    Dataset::default()
+                        .name(short_name)
+                        .marker(marker)
+                        .graph_type(GraphType::Line)
+                        .style(Style::default().fg(slot.color))
+                        .data(&slot_fft_points[i]),
+                );
             }
         }
     }
 
-    let y_title = if app.fft_log_scale { "log10(Mag)" } else { "Magnitude" };
+    let y_title = if app.fft_log_scale {
+        "log10(Mag)"
+    } else {
+        "Magnitude"
+    };
 
     let chart = Chart::new(datasets)
         .block(
@@ -1024,7 +1162,12 @@ fn draw_fft_chart(frame: &mut Frame, app: &mut App, area: Rect, _border_color: C
                 Rect::new(chart_x, chart_y, chart_w, chart_h),
                 hx,
                 hy,
-                ChartBounds { x_lo, x_hi, y_lo, y_hi },
+                ChartBounds {
+                    x_lo,
+                    x_hi,
+                    y_lo,
+                    y_hi,
+                },
             );
         }
     }
@@ -1043,7 +1186,11 @@ fn draw_status_bar(frame: &mut Frame, app: &App, area: Rect) {
         let conn_text = format!("{}/{} hosts", app.hosts_connected, app.host_count);
         spans.push(Span::styled(conn_text, Style::default().fg(status_color)));
     } else {
-        let status_text = if app.connected { "Connected" } else { "Disconnected" };
+        let status_text = if app.connected {
+            "Connected"
+        } else {
+            "Disconnected"
+        };
         spans.push(Span::styled(status_text, Style::default().fg(status_color)));
     }
 
@@ -1069,7 +1216,10 @@ fn draw_status_bar(frame: &mut Frame, app: &App, area: Rect) {
     }
 
     spans.push(Span::raw("| "));
-    spans.push(Span::styled(&app.status_message, Style::default().fg(Color::DarkGray)));
+    spans.push(Span::styled(
+        &app.status_message,
+        Style::default().fg(Color::DarkGray),
+    ));
 
     let line = Line::from(spans);
     let bar = Paragraph::new(line).style(Style::default().bg(Color::Black));
@@ -1115,13 +1265,25 @@ fn draw_help_popup(frame: &mut Frame, app: &App, area: Rect) {
     frame.render_widget(Clear, popup_area);
 
     let dim = Style::default().fg(Color::DarkGray);
-    let key_style = Style::default().fg(Color::Green).add_modifier(Modifier::BOLD);
+    let key_style = Style::default()
+        .fg(Color::Green)
+        .add_modifier(Modifier::BOLD);
 
     let help_text = vec![
-        Line::from(Span::styled("Redis TUI — Controls Reference", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD))),
+        Line::from(Span::styled(
+            "Redis TUI — Controls Reference",
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        )),
         Line::from(""),
         // --- Navigation ---
-        Line::from(vec![Span::styled("Navigation", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD))]),
+        Line::from(vec![Span::styled(
+            "Navigation",
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        )]),
         Line::from(vec![
             Span::styled("  Up/Down  ", key_style),
             Span::raw("Navigate keys, scroll value view, or select"),
@@ -1145,7 +1307,12 @@ fn draw_help_popup(frame: &mut Frame, app: &App, area: Rect) {
         ]),
         Line::from(""),
         // --- Key Operations ---
-        Line::from(vec![Span::styled("Key Operations", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD))]),
+        Line::from(vec![Span::styled(
+            "Key Operations",
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        )]),
         Line::from(vec![
             Span::styled("  /        ", key_style),
             Span::raw("Filter keys by glob pattern (e.g. sensor:*)"),
@@ -1176,7 +1343,12 @@ fn draw_help_popup(frame: &mut Frame, app: &App, area: Rect) {
         ]),
         Line::from(""),
         // --- Edit Mode ---
-        Line::from(vec![Span::styled("Edit Mode", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD))]),
+        Line::from(vec![Span::styled(
+            "Edit Mode",
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        )]),
         Line::from(vec![
             Span::styled("  Tab      ", key_style),
             Span::raw("Next field"),
@@ -1205,10 +1377,18 @@ fn draw_help_popup(frame: &mut Frame, app: &App, area: Rect) {
             Span::styled("  Ctrl+E   ", key_style),
             Span::raw("Toggle endianness (LE/BE)"),
         ]),
-        Line::from(Span::styled("            Paste supported in all input fields", dim)),
+        Line::from(Span::styled(
+            "            Paste supported in all input fields",
+            dim,
+        )),
         Line::from(""),
         // --- Streams ---
-        Line::from(vec![Span::styled("Streams", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD))]),
+        Line::from(vec![Span::styled(
+            "Streams",
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        )]),
         Line::from(vec![
             Span::styled("  l        ", key_style),
             Span::raw("Toggle live stream listener (up to 4 keys)"),
@@ -1217,15 +1397,26 @@ fn draw_help_popup(frame: &mut Frame, app: &App, area: Rect) {
             Span::styled("  i        ", key_style),
             Span::raw("Toggle ingestion rate view (stream + listening only)"),
         ]),
-        Line::from(Span::styled("            Shows entries/s chart with gap detection", dim)),
+        Line::from(Span::styled(
+            "            Shows entries/s chart with gap detection",
+            dim,
+        )),
         Line::from(vec![
             Span::styled("  w        ", key_style),
             Span::raw("Toggle signal generator (sine/square/saw/tri)"),
         ]),
-        Line::from(Span::styled("            ←/→ to select wave type and data type", dim)),
+        Line::from(Span::styled(
+            "            ←/→ to select wave type and data type",
+            dim,
+        )),
         Line::from(""),
         // --- Data Plot ---
-        Line::from(vec![Span::styled("Data Plot", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD))]),
+        Line::from(vec![Span::styled(
+            "Data Plot",
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        )]),
         Line::from(vec![
             Span::styled("  p        ", key_style),
             Span::raw("Toggle key in plot (up to 4, FIFO eviction)"),
@@ -1256,7 +1447,12 @@ fn draw_help_popup(frame: &mut Frame, app: &App, area: Rect) {
         ]),
         Line::from(""),
         // --- Mouse ---
-        Line::from(vec![Span::styled("Mouse", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD))]),
+        Line::from(vec![Span::styled(
+            "Mouse",
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        )]),
         Line::from(vec![
             Span::styled("  Click    ", key_style),
             Span::raw("Select a key in the key list"),
@@ -1265,7 +1461,10 @@ fn draw_help_popup(frame: &mut Frame, app: &App, area: Rect) {
             Span::styled("  Scroll   ", key_style),
             Span::raw("Key list / value view: scroll content"),
         ]),
-        Line::from(Span::styled("            Data plot: zoom in/out at cursor", dim)),
+        Line::from(Span::styled(
+            "            Data plot: zoom in/out at cursor",
+            dim,
+        )),
         Line::from(vec![
             Span::styled("  Drag     ", key_style),
             Span::raw("Pan the plot (X and Y axes)"),
@@ -1276,7 +1475,12 @@ fn draw_help_popup(frame: &mut Frame, app: &App, area: Rect) {
         ]),
         Line::from(""),
         // --- General ---
-        Line::from(vec![Span::styled("General", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD))]),
+        Line::from(vec![Span::styled(
+            "General",
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        )]),
         Line::from(vec![
             Span::styled("  ?        ", key_style),
             Span::raw("Toggle this help screen"),
@@ -1292,14 +1496,12 @@ fn draw_help_popup(frame: &mut Frame, app: &App, area: Rect) {
     let max_scroll = total_lines.saturating_sub(inner_height);
     let scroll = app.help_scroll.min(max_scroll);
 
-    let popup = Paragraph::new(help_text)
-        .scroll((scroll, 0))
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .border_style(Style::default().fg(HIGHLIGHT_COLOR))
-                .title(" Help — Up/Down to scroll, ? or Esc to close "),
-        );
+    let popup = Paragraph::new(help_text).scroll((scroll, 0)).block(
+        Block::default()
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(HIGHLIGHT_COLOR))
+            .title(" Help — Up/Down to scroll, ? or Esc to close "),
+    );
     frame.render_widget(popup, popup_area);
 }
 
@@ -1376,7 +1578,9 @@ fn draw_signal_gen_popup(frame: &mut Frame, app: &App, area: Rect) {
     let wave_focused = app.signal_gen_focus == 0;
     let wave_indicator = if wave_focused { "> " } else { "  " };
     let wave_label_style = if wave_focused {
-        Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)
+        Style::default()
+            .fg(Color::Cyan)
+            .add_modifier(Modifier::BOLD)
     } else {
         Style::default().fg(Color::Yellow)
     };
@@ -1386,7 +1590,9 @@ fn draw_signal_gen_popup(frame: &mut Frame, app: &App, area: Rect) {
         Span::styled("< ", Style::default().fg(Color::DarkGray)),
         Span::styled(
             WAVE_TYPES[app.signal_gen_wave_idx],
-            Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
         ),
         Span::styled(" >", Style::default().fg(Color::DarkGray)),
         if wave_focused {
@@ -1400,7 +1606,9 @@ fn draw_signal_gen_popup(frame: &mut Frame, app: &App, area: Rect) {
     let dtype_focused = app.signal_gen_focus == 1;
     let dtype_indicator = if dtype_focused { "> " } else { "  " };
     let dtype_label_style = if dtype_focused {
-        Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)
+        Style::default()
+            .fg(Color::Cyan)
+            .add_modifier(Modifier::BOLD)
     } else {
         Style::default().fg(Color::Yellow)
     };
@@ -1411,7 +1619,9 @@ fn draw_signal_gen_popup(frame: &mut Frame, app: &App, area: Rect) {
         Span::styled("< ", Style::default().fg(Color::DarkGray)),
         Span::styled(
             dtype_name,
-            Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
         ),
         Span::styled(" >", Style::default().fg(Color::DarkGray)),
         if dtype_focused {
@@ -1429,7 +1639,9 @@ fn draw_signal_gen_popup(frame: &mut Frame, app: &App, area: Rect) {
         let is_focused = app.signal_gen_focus == focus_idx;
         let indicator = if is_focused { "> " } else { "  " };
         let label_style = if is_focused {
-            Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD)
         } else {
             Style::default().fg(Color::Yellow)
         };
@@ -1470,7 +1682,11 @@ fn draw_edit_popup(frame: &mut Frame, app: &App, area: Rect) {
     let is_new_key = app.edit_operation == Some(EditOperation::NewKey);
     let is_multi = app.is_multi_entry_edit();
     let extra_type = if is_new_key { 2 } else { 0 };
-    let extra_count = if is_multi && app.edit_multi_count > 0 { 1 } else { 0 };
+    let extra_count = if is_multi && app.edit_multi_count > 0 {
+        1
+    } else {
+        0
+    };
     let extra_binary = if app.edit_binary_mode { 2 } else { 1 }; // binary mode row + type/endian row
     let height = (5 + field_count * 2 + extra_type + extra_count + extra_binary).min(24) as u16;
     let popup_area = centered_rect(60, height, area);
@@ -1521,10 +1737,17 @@ fn draw_edit_popup(frame: &mut Frame, app: &App, area: Rect) {
 
     // Binary mode toggle
     let bin_label = if app.edit_binary_mode { "ON" } else { "OFF" };
-    let bin_color = if app.edit_binary_mode { Color::Green } else { Color::DarkGray };
+    let bin_color = if app.edit_binary_mode {
+        Color::Green
+    } else {
+        Color::DarkGray
+    };
     lines.push(Line::from(vec![
         Span::styled("Binary: ", Style::default().fg(Color::Yellow)),
-        Span::styled(bin_label, Style::default().fg(bin_color).add_modifier(Modifier::BOLD)),
+        Span::styled(
+            bin_label,
+            Style::default().fg(bin_color).add_modifier(Modifier::BOLD),
+        ),
         Span::styled("  [Ctrl+B]toggle", Style::default().fg(Color::DarkGray)),
     ]));
 
@@ -1534,10 +1757,23 @@ fn draw_edit_popup(frame: &mut Frame, app: &App, area: Rect) {
     if app.edit_binary_mode {
         lines.push(Line::from(vec![
             Span::styled("  Encode: ", Style::default().fg(Color::Yellow)),
-            Span::styled(&dtype_name, Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                &dtype_name,
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
+            ),
             Span::styled(" / ", Style::default().fg(Color::DarkGray)),
-            Span::styled(&endian_name, Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
-            Span::styled("  [Ctrl+T]type [Ctrl+E]endian", Style::default().fg(Color::DarkGray)),
+            Span::styled(
+                &endian_name,
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                "  [Ctrl+T]type [Ctrl+E]endian",
+                Style::default().fg(Color::DarkGray),
+            ),
         ]));
     }
 
@@ -1621,7 +1857,12 @@ struct ChartBounds {
 
 fn draw_crosshair(frame: &mut Frame, area: Rect, data_x: f64, data_y: f64, bounds: ChartBounds) {
     let (cx, cy, cw, ch) = (area.x, area.y, area.width, area.height);
-    let ChartBounds { x_lo, x_hi, y_lo, y_hi } = bounds;
+    let ChartBounds {
+        x_lo,
+        x_hi,
+        y_lo,
+        y_hi,
+    } = bounds;
     if cw <= 1 || ch <= 1 || x_hi <= x_lo || y_hi <= y_lo {
         return;
     }
@@ -1770,14 +2011,37 @@ mod tests {
 
         let buffer = terminal.backend().buffer().clone();
         // Collect the first row into a string
-        let row: String = (0..80).map(|x| buffer.cell((x, 0)).unwrap().symbol().chars().next().unwrap_or(' ')).collect();
+        let row: String = (0..80)
+            .map(|x| {
+                buffer
+                    .cell((x, 0))
+                    .unwrap()
+                    .symbol()
+                    .chars()
+                    .next()
+                    .unwrap_or(' ')
+            })
+            .collect();
 
         let version_string = format!("v{}", env!("CARGO_PKG_VERSION"));
-        assert!(row.contains("Redis TUI"), "title bar should contain 'Redis TUI', got: {}", row);
-        assert!(row.contains(&version_string), "title bar should contain '{}' in top-right, got: {}", version_string, row);
+        assert!(
+            row.contains("Redis TUI"),
+            "title bar should contain 'Redis TUI', got: {}",
+            row
+        );
+        assert!(
+            row.contains(&version_string),
+            "title bar should contain '{}' in top-right, got: {}",
+            version_string,
+            row
+        );
         // Version should be right-aligned (near end of row)
         let version_pos = row.find(&version_string).unwrap();
-        assert!(version_pos > 60, "version should be right-aligned, found at position {}", version_pos);
+        assert!(
+            version_pos > 60,
+            "version should be right-aligned, found at position {}",
+            version_pos
+        );
     }
 
     #[test]
@@ -1794,10 +2058,28 @@ mod tests {
             .unwrap();
 
         let buffer = terminal.backend().buffer().clone();
-        let row: String = (0..80).map(|x| buffer.cell((x, 0)).unwrap().symbol().chars().next().unwrap_or(' ')).collect();
+        let row: String = (0..80)
+            .map(|x| {
+                buffer
+                    .cell((x, 0))
+                    .unwrap()
+                    .symbol()
+                    .chars()
+                    .next()
+                    .unwrap_or(' ')
+            })
+            .collect();
 
-        assert!(row.contains("[?]Help"), "title bar should contain '[?]Help', got: {}", row);
-        assert!(row.contains("[q]Quit"), "title bar should contain '[q]Quit', got: {}", row);
+        assert!(
+            row.contains("[?]Help"),
+            "title bar should contain '[?]Help', got: {}",
+            row
+        );
+        assert!(
+            row.contains("[q]Quit"),
+            "title bar should contain '[q]Quit', got: {}",
+            row
+        );
     }
 
     #[test]
@@ -1819,7 +2101,12 @@ mod tests {
                     Rect::new(cx, cy, cw, ch),
                     100.0,
                     50.0,
-                    ChartBounds { x_lo: 0.0, x_hi: 100.0, y_lo: 0.0, y_hi: 100.0 },
+                    ChartBounds {
+                        x_lo: 0.0,
+                        x_hi: 100.0,
+                        y_lo: 0.0,
+                        y_hi: 100.0,
+                    },
                 );
             })
             .unwrap();
@@ -1838,7 +2125,12 @@ mod tests {
                     Rect::new(10, 5, 60, 15),
                     0.0,
                     0.0,
-                    ChartBounds { x_lo: 0.0, x_hi: 100.0, y_lo: 0.0, y_hi: 100.0 },
+                    ChartBounds {
+                        x_lo: 0.0,
+                        x_hi: 100.0,
+                        y_lo: 0.0,
+                        y_hi: 100.0,
+                    },
                 );
             })
             .unwrap();
@@ -1862,28 +2154,48 @@ mod tests {
                     Rect::new(cx, cy, cw, ch),
                     0.0,
                     0.0,
-                    ChartBounds { x_lo: 0.0, x_hi: 100.0, y_lo: 0.0, y_hi: 100.0 },
+                    ChartBounds {
+                        x_lo: 0.0,
+                        x_hi: 100.0,
+                        y_lo: 0.0,
+                        y_hi: 100.0,
+                    },
                 );
                 draw_crosshair(
                     frame,
                     Rect::new(cx, cy, cw, ch),
                     100.0,
                     0.0,
-                    ChartBounds { x_lo: 0.0, x_hi: 100.0, y_lo: 0.0, y_hi: 100.0 },
+                    ChartBounds {
+                        x_lo: 0.0,
+                        x_hi: 100.0,
+                        y_lo: 0.0,
+                        y_hi: 100.0,
+                    },
                 );
                 draw_crosshair(
                     frame,
                     Rect::new(cx, cy, cw, ch),
                     0.0,
                     100.0,
-                    ChartBounds { x_lo: 0.0, x_hi: 100.0, y_lo: 0.0, y_hi: 100.0 },
+                    ChartBounds {
+                        x_lo: 0.0,
+                        x_hi: 100.0,
+                        y_lo: 0.0,
+                        y_hi: 100.0,
+                    },
                 );
                 draw_crosshair(
                     frame,
                     Rect::new(cx, cy, cw, ch),
                     100.0,
                     100.0,
-                    ChartBounds { x_lo: 0.0, x_hi: 100.0, y_lo: 0.0, y_hi: 100.0 },
+                    ChartBounds {
+                        x_lo: 0.0,
+                        x_hi: 100.0,
+                        y_lo: 0.0,
+                        y_hi: 100.0,
+                    },
                 );
             })
             .unwrap();
@@ -1894,11 +2206,7 @@ mod tests {
         // NaN fails every comparison, so `frac < 0.0 || frac > 1.0` does not catch it.
         // Execution then reaches `(NaN * ..) as u16`, which saturates to 0 and pins a
         // bogus crosshair to the chart's top-left corner as if that were the data point.
-        for (dx, dy) in [
-            (f64::NAN, 50.0),
-            (50.0, f64::NAN),
-            (f64::NAN, f64::NAN),
-        ] {
+        for (dx, dy) in [(f64::NAN, 50.0), (50.0, f64::NAN), (f64::NAN, f64::NAN)] {
             let backend = TestBackend::new(80, 24);
             let mut terminal = Terminal::new(backend).unwrap();
             terminal
@@ -1908,7 +2216,12 @@ mod tests {
                         Rect::new(10, 5, 60, 15),
                         dx,
                         dy,
-                        ChartBounds { x_lo: 0.0, x_hi: 100.0, y_lo: 0.0, y_hi: 100.0 },
+                        ChartBounds {
+                            x_lo: 0.0,
+                            x_hi: 100.0,
+                            y_lo: 0.0,
+                            y_hi: 100.0,
+                        },
                     );
                 })
                 .unwrap();
@@ -1942,7 +2255,12 @@ mod tests {
                     Rect::new(0, 0, 2, 2),
                     50.0,
                     50.0,
-                    ChartBounds { x_lo: 0.0, x_hi: 100.0, y_lo: 0.0, y_hi: 100.0 },
+                    ChartBounds {
+                        x_lo: 0.0,
+                        x_hi: 100.0,
+                        y_lo: 0.0,
+                        y_hi: 100.0,
+                    },
                 );
                 // Degenerate areas should be no-ops
                 draw_crosshair(
@@ -1950,14 +2268,24 @@ mod tests {
                     Rect::new(0, 0, 0, 0),
                     50.0,
                     50.0,
-                    ChartBounds { x_lo: 0.0, x_hi: 100.0, y_lo: 0.0, y_hi: 100.0 },
+                    ChartBounds {
+                        x_lo: 0.0,
+                        x_hi: 100.0,
+                        y_lo: 0.0,
+                        y_hi: 100.0,
+                    },
                 );
                 draw_crosshair(
                     frame,
                     Rect::new(0, 0, 1, 1),
                     50.0,
                     50.0,
-                    ChartBounds { x_lo: 0.0, x_hi: 100.0, y_lo: 0.0, y_hi: 100.0 },
+                    ChartBounds {
+                        x_lo: 0.0,
+                        x_hi: 100.0,
+                        y_lo: 0.0,
+                        y_hi: 100.0,
+                    },
                 );
             })
             .unwrap();

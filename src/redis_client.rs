@@ -205,10 +205,8 @@ impl RedisClient {
                 Ok(RedisValue::ZSet(vals))
             }
             "hash" => {
-                let map: HashMap<String, Vec<u8>> = self
-                    .connection
-                    .hgetall(key)
-                    .context("Failed to HGETALL")?;
+                let map: HashMap<String, Vec<u8>> =
+                    self.connection.hgetall(key).context("Failed to HGETALL")?;
                 let mut pairs: Vec<(String, Vec<u8>)> = map.into_iter().collect();
                 pairs.sort_by(|a, b| a.0.cmp(&b.0));
                 Ok(RedisValue::Hash(pairs))
@@ -237,9 +235,7 @@ impl RedisClient {
             if let redis::Value::Array(parts) = entry_val {
                 if parts.len() >= 2 {
                     let id = match &parts[0] {
-                        redis::Value::BulkString(b) => {
-                            String::from_utf8_lossy(b).to_string()
-                        }
+                        redis::Value::BulkString(b) => String::from_utf8_lossy(b).to_string(),
                         _ => continue,
                     };
 
@@ -276,7 +272,12 @@ impl RedisClient {
     /// Blocking XREAD for new entries after `last_id`.
     /// Blocks up to `timeout_ms` milliseconds (0 = forever).
     /// Returns new entries (empty vec if timeout).
-    pub fn xread_blocking(&mut self, key: &str, last_id: &str, timeout_ms: u64) -> Result<Vec<StreamEntry>> {
+    pub fn xread_blocking(
+        &mut self,
+        key: &str,
+        last_id: &str,
+        timeout_ms: u64,
+    ) -> Result<Vec<StreamEntry>> {
         let raw: redis::Value = redis::cmd("XREAD")
             .arg("BLOCK")
             .arg(timeout_ms)
@@ -318,7 +319,10 @@ impl RedisClient {
                                                 redis::Value::BulkString(b) => {
                                                     String::from_utf8_lossy(b).to_string()
                                                 }
-                                                _ => { i += 2; continue; }
+                                                _ => {
+                                                    i += 2;
+                                                    continue;
+                                                }
                                             };
                                             let fval = match &fv[i + 1] {
                                                 redis::Value::BulkString(b) => b.clone(),
@@ -340,9 +344,7 @@ impl RedisClient {
     }
 
     pub fn delete_key(&mut self, key: &str) -> Result<()> {
-        let _: () = self.connection
-            .del(key)
-            .context("Failed to DEL key")?;
+        let _: () = self.connection.del(key).context("Failed to DEL key")?;
         Ok(())
     }
 
@@ -374,7 +376,10 @@ impl RedisClient {
     }
 
     pub fn set_bytes(&mut self, key: &str, value: &[u8]) -> Result<()> {
-        let _: () = self.connection.set(key, value).context("Failed to SET bytes")?;
+        let _: () = self
+            .connection
+            .set(key, value)
+            .context("Failed to SET bytes")?;
         Ok(())
     }
 
@@ -666,7 +671,8 @@ impl MultiRedisClient {
         // Record collisions
         for (key, hosts) in &seen {
             if hosts.len() > 1 {
-                let host_names: Vec<String> = hosts.iter().map(|&i| self.labels[i].clone()).collect();
+                let host_names: Vec<String> =
+                    hosts.iter().map(|&i| self.labels[i].clone()).collect();
                 self.collisions.push((key.clone(), host_names));
             }
         }
@@ -723,7 +729,10 @@ impl MultiRedisClient {
     }
 
     pub fn num_connected(&mut self) -> usize {
-        self.clients.iter_mut().filter(|c| c.connection.is_open()).count()
+        self.clients
+            .iter_mut()
+            .filter(|c| c.connection.is_open())
+            .count()
     }
 
     // ─── Write operations (route to key owner) ────────────────
@@ -1091,7 +1100,10 @@ mod tests {
             .arg("keeper")
             .query(&mut client.connection)
             .unwrap();
-        assert!(exists, "the key must still exist - no command should have been sent");
+        assert!(
+            exists,
+            "the key must still exist - no command should have been sent"
+        );
     }
 
     #[test]

@@ -1,8 +1,8 @@
-use crate::data::{DataType, Endianness, decode_blob, encode_values, is_binary};
+use crate::data::{decode_blob, encode_values, is_binary, DataType, Endianness};
 use crate::redis_client::{KeyInfo, MultiRedisClient, RedisValue, StreamEntry};
 use ratatui::style::Color;
 use ratatui::widgets::ListState;
-use rustfft::{FftPlanner, num_complex::Complex};
+use rustfft::{num_complex::Complex, FftPlanner};
 use std::collections::{HashMap, VecDeque};
 use std::sync::mpsc;
 
@@ -15,12 +15,8 @@ pub const MAX_PLOT_SLOTS: usize = 4;
 pub const MAX_STREAM_ENTRIES: usize = 10;
 
 /// Colors assigned to each plot slot
-pub const PLOT_COLORS: [Color; MAX_PLOT_SLOTS] = [
-    Color::Cyan,
-    Color::Yellow,
-    Color::Green,
-    Color::Magenta,
-];
+pub const PLOT_COLORS: [Color; MAX_PLOT_SLOTS] =
+    [Color::Cyan, Color::Yellow, Color::Green, Color::Magenta];
 
 /// A slot in the multi-key plot FIFO
 #[derive(Clone)]
@@ -30,12 +26,13 @@ pub struct PlotSlot {
     pub color: Color,
     pub data_type: DataType,
     pub endianness: Endianness,
-    pub y_min: Option<f64>,  // None = auto
-    pub y_max: Option<f64>,  // None = auto
+    pub y_min: Option<f64>, // None = auto
+    pub y_max: Option<f64>, // None = auto
 }
 
 /// Windows used for the multi-average display (value view + rate chart header)
-pub const RATE_WINDOWS: &[(u64, &str)] = &[(1, "1s"), (5, "5s"), (10, "10s"), (20, "20s"), (30, "30s")];
+pub const RATE_WINDOWS: &[(u64, &str)] =
+    &[(1, "1s"), (5, "5s"), (10, "10s"), (20, "20s"), (30, "30s")];
 
 /// How long (ms) a display width stays pinned after it would otherwise shrink
 const RATE_WIDTH_HYSTERESIS_MS: u64 = 3_000;
@@ -125,7 +122,13 @@ fn compute_five_num(rate_history: &VecDeque<(u64, f64)>) -> Option<[f64; 5]> {
         let frac = idx - lo as f64;
         vals[lo] * (1.0 - frac) + vals[hi] * frac
     };
-    Some([vals[0], percentile(0.25), percentile(0.5), percentile(0.75), vals[n - 1]])
+    Some([
+        vals[0],
+        percentile(0.25),
+        percentile(0.5),
+        percentile(0.75),
+        vals[n - 1],
+    ])
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -207,12 +210,21 @@ impl RateTracker {
             return 0.0;
         }
         let cutoff = now_ms.saturating_sub(window_secs * 1000);
-        let count = self.entry_timestamps.iter().filter(|&&ts| ts >= cutoff).count();
+        let count = self
+            .entry_timestamps
+            .iter()
+            .filter(|&&ts| ts >= cutoff)
+            .count();
         count as f64 / window_secs as f64
     }
 
     /// Update a sticky display width: grows immediately, shrinks only after RATE_WIDTH_HYSTERESIS_MS.
-    fn update_sticky_width(pinned: &mut usize, pinned_until_ms: &mut u64, needed: usize, now_ms: u64) {
+    fn update_sticky_width(
+        pinned: &mut usize,
+        pinned_until_ms: &mut u64,
+        needed: usize,
+        now_ms: u64,
+    ) {
         if needed > *pinned {
             *pinned = needed;
             *pinned_until_ms = now_ms + RATE_WIDTH_HYSTERESIS_MS;
@@ -257,10 +269,10 @@ pub struct App {
     // Data plot
     pub data_type: DataType,
     pub endianness: Endianness,
-    pub plot_data: Vec<f64>,            // primary key's plot data (backward compat)
-    pub plot_slots: Vec<PlotSlot>,      // multi-key plot FIFO (up to MAX_PLOT_SLOTS)
-    pub listening_keys: Vec<String>,    // keys with active stream listeners (set by main loop)
-    pub siggen_keys: Vec<String>,       // keys with active signal generators (set by main loop)
+    pub plot_data: Vec<f64>, // primary key's plot data (backward compat)
+    pub plot_slots: Vec<PlotSlot>, // multi-key plot FIFO (up to MAX_PLOT_SLOTS)
+    pub listening_keys: Vec<String>, // keys with active stream listeners (set by main loop)
+    pub siggen_keys: Vec<String>, // keys with active signal generators (set by main loop)
     pub plot_auto_limits: bool,
     pub plot_y_min: f64,
     pub plot_y_max: f64,
@@ -285,8 +297,8 @@ pub struct App {
     pub fft_x_max: f64,
 
     // Mouse state
-    pub mouse_x: u16,         // terminal column
-    pub mouse_y: u16,         // terminal row
+    pub mouse_x: u16, // terminal column
+    pub mouse_y: u16, // terminal row
     pub mouse_dragging: bool,
     pub drag_start_x: u16,
     pub drag_start_y: u16,
@@ -297,11 +309,11 @@ pub struct App {
     /// Data coordinates of hover position (if mouse is in a chart area)
     pub hover_data_x: Option<f64>,
     pub hover_data_y: Option<f64>,
-    pub hover_in_fft: bool,   // true if hovering in FFT chart
+    pub hover_in_fft: bool, // true if hovering in FFT chart
 
     // Panel area rects (set during draw)
-    pub key_list_area: Option<(u16, u16, u16, u16)>,     // x, y, w, h
-    pub value_view_area: Option<(u16, u16, u16, u16)>,   // x, y, w, h
+    pub key_list_area: Option<(u16, u16, u16, u16)>, // x, y, w, h
+    pub value_view_area: Option<(u16, u16, u16, u16)>, // x, y, w, h
     pub signal_chart_area: Option<(u16, u16, u16, u16)>, // x, y, w, h (inner)
     pub fft_chart_area: Option<(u16, u16, u16, u16)>,
 
@@ -327,10 +339,10 @@ pub struct App {
     pub edit_operation: Option<EditOperation>,
     pub edit_fields: Vec<(String, String)>, // (label, value)
     pub edit_focus: usize,
-    pub edit_key: String,          // the key being edited
-    pub edit_multi_count: usize,   // how many entries submitted in this session
-    pub new_key_type_idx: usize,   // index into KEY_TYPES for new key creation
-    pub edit_binary_mode: bool,    // encode values as binary blobs
+    pub edit_key: String,             // the key being edited
+    pub edit_multi_count: usize,      // how many entries submitted in this session
+    pub new_key_type_idx: usize,      // index into KEY_TYPES for new key creation
+    pub edit_binary_mode: bool,       // encode values as binary blobs
     pub edit_binary_dtype_idx: usize, // index into DataType::all() for binary encoding
 
     // Signal generator state
@@ -440,7 +452,7 @@ impl App {
 
             rate_view: false,
             rate_history_secs: 1200, // 20 minutes default (overridden by CLI)
-            rate_avg_window_secs: 2,  // 2 seconds default (overridden by CLI)
+            rate_avg_window_secs: 2, // 2 seconds default (overridden by CLI)
             rate_trackers: HashMap::new(),
         }
     }
@@ -479,7 +491,10 @@ impl App {
 
     /// Get the color assigned to a plotted key, if any
     pub fn plot_color_for_key(&self, key_name: &str) -> Option<Color> {
-        self.plot_slots.iter().find(|s| s.key_name == key_name).map(|s| s.color)
+        self.plot_slots
+            .iter()
+            .find(|s| s.key_name == key_name)
+            .map(|s| s.color)
     }
 
     /// Update plot data for a specific slot by key name, using the slot's own data type
@@ -488,12 +503,8 @@ impl App {
             let dt = slot.data_type;
             let en = slot.endianness;
             slot.data = match value {
-                RedisValue::String(bytes) => {
-                    decode_blob(bytes, dt, en)
-                }
-                RedisValue::Stream(entries) => {
-                    extract_stream_plot_data(entries, dt, en)
-                }
+                RedisValue::String(bytes) => decode_blob(bytes, dt, en),
+                RedisValue::Stream(entries) => extract_stream_plot_data(entries, dt, en),
                 RedisValue::List(items) => {
                     let mut data = Vec::new();
                     for item in items {
@@ -507,9 +518,7 @@ impl App {
                     }
                     data
                 }
-                RedisValue::ZSet(pairs) => {
-                    pairs.iter().map(|(_, score)| *score).collect()
-                }
+                RedisValue::ZSet(pairs) => pairs.iter().map(|(_, score)| *score).collect(),
                 RedisValue::Hash(pairs) => {
                     let mut data = Vec::new();
                     for (_, val) in pairs {
@@ -558,7 +567,12 @@ impl App {
 
     /// Update the ingestion rate tracker for a stream key with newly received entries.
     /// Called from the main loop drain for every active StreamListener.
-    pub fn update_rate_tracker(&mut self, key_name: &str, new_entries: &[StreamEntry], now_ms: u64) {
+    pub fn update_rate_tracker(
+        &mut self,
+        key_name: &str,
+        new_entries: &[StreamEntry],
+        now_ms: u64,
+    ) {
         let history_secs = self.rate_history_secs;
 
         // Parse unix_ms from entry IDs (format: "{unix_ms}-{seq}")
@@ -584,8 +598,16 @@ impl App {
 
                 let now_for_gap = first_new_ms; // approximate: compare relative to arrival
                 let cutoff_30s = now_for_gap.saturating_sub(30_000);
-                let count_30s = tracker.entry_timestamps.iter().filter(|&&ts| ts >= cutoff_30s).count();
-                let current_rate = if count_30s > 0 { count_30s as f64 / 30.0 } else { 0.0 };
+                let count_30s = tracker
+                    .entry_timestamps
+                    .iter()
+                    .filter(|&&ts| ts >= cutoff_30s)
+                    .count();
+                let current_rate = if count_30s > 0 {
+                    count_30s as f64 / 30.0
+                } else {
+                    0.0
+                };
 
                 let threshold_ms = if current_rate > 0.0 {
                     ((1000.0 / current_rate) * 1.85).max(500.0) as u64
@@ -619,7 +641,11 @@ impl App {
         // Chart rate: sliding window controlled by --rate-avg-window (default 2s)
         let chart_window = self.rate_avg_window_secs.max(1);
         let chart_cutoff_ms = now_ms.saturating_sub(chart_window * 1000);
-        let chart_count = tracker.entry_timestamps.iter().filter(|&&ts| ts >= chart_cutoff_ms).count();
+        let chart_count = tracker
+            .entry_timestamps
+            .iter()
+            .filter(|&&ts| ts >= chart_cutoff_ms)
+            .count();
         let chart_rate = chart_count as f64 / chart_window as f64;
 
         // Only record once the window is full — avoids low warmup samples skewing the minimum
@@ -659,7 +685,12 @@ impl App {
                 now_ms,
             );
         }
-        let rate_needed = tracker.rate_display_vals.iter().map(|r| format!("{:.1}", r).len()).max().unwrap_or(3);
+        let rate_needed = tracker
+            .rate_display_vals
+            .iter()
+            .map(|r| format!("{:.1}", r).len())
+            .max()
+            .unwrap_or(3);
         RateTracker::update_sticky_width(
             &mut tracker.rate_display_width,
             &mut tracker.rate_display_width_until_ms,
@@ -676,7 +707,12 @@ impl App {
                     now_ms,
                 );
             }
-            let stat_needed = tracker.stat_display_vals.iter().map(|v| format!("{:.1}", v).len()).max().unwrap_or(3);
+            let stat_needed = tracker
+                .stat_display_vals
+                .iter()
+                .map(|v| format!("{:.1}", v).len())
+                .max()
+                .unwrap_or(3);
             RateTracker::update_sticky_width(
                 &mut tracker.stat_display_width,
                 &mut tracker.stat_display_width_until_ms,
@@ -783,8 +819,7 @@ impl App {
                         cap_stream_entries(&mut value);
                         // Track last stream ID for XREAD polling
                         if let RedisValue::Stream(ref entries) = value {
-                            self.last_stream_id =
-                                entries.last().map(|e| e.id.clone());
+                            self.last_stream_id = entries.last().map(|e| e.id.clone());
                         } else {
                             self.last_stream_id = None;
                         }
@@ -805,7 +840,10 @@ impl App {
 
     /// Append new stream entries from XREAD into the current value.
     /// Returns true if new entries were added.
-    pub fn append_stream_entries(&mut self, new_entries: Vec<crate::redis_client::StreamEntry>) -> bool {
+    pub fn append_stream_entries(
+        &mut self,
+        new_entries: Vec<crate::redis_client::StreamEntry>,
+    ) -> bool {
         if new_entries.is_empty() {
             return false;
         }
@@ -859,9 +897,7 @@ impl App {
 
     fn update_plot_data(&mut self, value: &RedisValue) {
         self.plot_data = match value {
-            RedisValue::String(bytes) => {
-                decode_blob(bytes, self.data_type, self.endianness)
-            }
+            RedisValue::String(bytes) => decode_blob(bytes, self.data_type, self.endianness),
             RedisValue::Stream(entries) => {
                 // Extract _ fields from stream entries and decode
                 self.expanded_stream_entries = vec![false; entries.len()];
@@ -914,11 +950,19 @@ impl App {
     /// Cycle the data type for the currently selected key's plot slot (if plotted),
     /// otherwise cycle the global data type. Then recompute.
     pub fn cycle_data_type(&mut self, forward: bool) {
-        let new_type = if forward { self.data_type.next() } else { self.data_type.prev() };
+        let new_type = if forward {
+            self.data_type.next()
+        } else {
+            self.data_type.prev()
+        };
         // Update the slot for the selected key if it's plotted
         if let Some(key) = self.selected_key_name().map(|s| s.to_string()) {
             if let Some(slot) = self.plot_slots.iter_mut().find(|s| s.key_name == key) {
-                slot.data_type = if forward { slot.data_type.next() } else { slot.data_type.prev() };
+                slot.data_type = if forward {
+                    slot.data_type.next()
+                } else {
+                    slot.data_type.prev()
+                };
                 self.data_type = slot.data_type;
             } else {
                 self.data_type = new_type;
@@ -974,7 +1018,9 @@ impl App {
             self.fft_rx = None;
             // Non-blocking join — avoid stalling the UI thread
             if let Some(h) = self.fft_handle.take() {
-                std::thread::spawn(move || { let _ = h.join(); });
+                std::thread::spawn(move || {
+                    let _ = h.join();
+                });
             }
         }
     }
@@ -987,7 +1033,9 @@ impl App {
             self.fft_rx = None;
             // Non-blocking join — avoid stalling the UI thread
             if let Some(h) = self.fft_handle.take() {
-                std::thread::spawn(move || { let _ = h.join(); });
+                std::thread::spawn(move || {
+                    let _ = h.join();
+                });
             }
             return;
         }
@@ -1098,7 +1146,14 @@ impl App {
             };
             let full_x = self.fft_data.len() as f64;
             let (nx0, nx1) = zoom_range(x0, x1, factor, center_frac_x, 0.0, full_x);
-            let (ny0, ny1) = zoom_range(y0, y1, factor, center_frac_y, f64::NEG_INFINITY, f64::INFINITY);
+            let (ny0, ny1) = zoom_range(
+                y0,
+                y1,
+                factor,
+                center_frac_y,
+                f64::NEG_INFINITY,
+                f64::INFINITY,
+            );
             self.fft_x_min = nx0;
             self.fft_x_max = nx1;
             self.fft_y_min = ny0;
@@ -1113,7 +1168,14 @@ impl App {
             };
             let full_x = self.plot_data.len() as f64;
             let (nx0, nx1) = zoom_range(x0, x1, factor, center_frac_x, 0.0, full_x);
-            let (ny0, ny1) = zoom_range(y0, y1, factor, center_frac_y, f64::NEG_INFINITY, f64::INFINITY);
+            let (ny0, ny1) = zoom_range(
+                y0,
+                y1,
+                factor,
+                center_frac_y,
+                f64::NEG_INFINITY,
+                f64::INFINITY,
+            );
             self.plot_x_min = nx0;
             self.plot_x_max = nx1;
             self.plot_y_min = ny0;
@@ -1192,12 +1254,24 @@ impl App {
         } else {
             // Per-slot Y limits
             for slot in &self.plot_slots {
-                let auto_min = slot.data.iter().copied()
-                    .filter(|v| v.is_finite()).fold(f64::INFINITY, f64::min);
-                let auto_max = slot.data.iter().copied()
-                    .filter(|v| v.is_finite()).fold(f64::NEG_INFINITY, f64::max);
-                let y_min = slot.y_min.unwrap_or(if auto_min.is_finite() { auto_min } else { 0.0 });
-                let y_max = slot.y_max.unwrap_or(if auto_max.is_finite() { auto_max } else { 1.0 });
+                let auto_min = slot
+                    .data
+                    .iter()
+                    .copied()
+                    .filter(|v| v.is_finite())
+                    .fold(f64::INFINITY, f64::min);
+                let auto_max = slot
+                    .data
+                    .iter()
+                    .copied()
+                    .filter(|v| v.is_finite())
+                    .fold(f64::NEG_INFINITY, f64::max);
+                let y_min = slot
+                    .y_min
+                    .unwrap_or(if auto_min.is_finite() { auto_min } else { 0.0 });
+                let y_max = slot
+                    .y_max
+                    .unwrap_or(if auto_max.is_finite() { auto_max } else { 1.0 });
                 let short_name = if slot.key_name.len() > 10 {
                     format!("{}...", &slot.key_name[..10])
                 } else {
@@ -1367,7 +1441,10 @@ impl App {
                 if show_binary {
                     let mut lines = Vec::new();
                     // Show decoded values using current data type
-                    lines.push(format!("── Decoded as {} ({}) ──", self.data_type, self.endianness));
+                    lines.push(format!(
+                        "── Decoded as {} ({}) ──",
+                        self.data_type, self.endianness
+                    ));
                     let decoded = crate::data::format_blob(bytes, self.data_type, self.endianness);
                     for l in decoded.lines() {
                         lines.push(l.to_string());
@@ -1389,44 +1466,38 @@ impl App {
                     s.lines().map(|l| l.to_string()).collect()
                 }
             }
-            Some(RedisValue::List(items)) => {
-                items
-                    .iter()
-                    .enumerate()
-                    .map(|(i, item)| {
-                        let s = String::from_utf8_lossy(item);
-                        format!("[{}] {}", i, s)
-                    })
-                    .collect()
+            Some(RedisValue::List(items)) => items
+                .iter()
+                .enumerate()
+                .map(|(i, item)| {
+                    let s = String::from_utf8_lossy(item);
+                    format!("[{}] {}", i, s)
+                })
+                .collect(),
+            Some(RedisValue::Set(items)) => items
+                .iter()
+                .map(|item| {
+                    let s = String::from_utf8_lossy(item);
+                    format!("- {}", s)
+                })
+                .collect(),
+            Some(RedisValue::ZSet(pairs)) => pairs
+                .iter()
+                .map(|(member, score)| {
+                    let s = String::from_utf8_lossy(member);
+                    format!("{:.4}  {}", score, s)
+                })
+                .collect(),
+            Some(RedisValue::Hash(pairs)) => pairs
+                .iter()
+                .map(|(field, val)| {
+                    let s = String::from_utf8_lossy(val);
+                    format!("{}  =>  {}", field, s)
+                })
+                .collect(),
+            Some(RedisValue::Stream(entries)) => {
+                format_stream_entries(entries, self.data_type, self.endianness)
             }
-            Some(RedisValue::Set(items)) => {
-                items
-                    .iter()
-                    .map(|item| {
-                        let s = String::from_utf8_lossy(item);
-                        format!("- {}", s)
-                    })
-                    .collect()
-            }
-            Some(RedisValue::ZSet(pairs)) => {
-                pairs
-                    .iter()
-                    .map(|(member, score)| {
-                        let s = String::from_utf8_lossy(member);
-                        format!("{:.4}  {}", score, s)
-                    })
-                    .collect()
-            }
-            Some(RedisValue::Hash(pairs)) => {
-                pairs
-                    .iter()
-                    .map(|(field, val)| {
-                        let s = String::from_utf8_lossy(val);
-                        format!("{}  =>  {}", field, s)
-                    })
-                    .collect()
-            }
-            Some(RedisValue::Stream(entries)) => format_stream_entries(entries, self.data_type, self.endianness),
             Some(RedisValue::Unknown(msg)) => vec![msg.clone()],
         }
     }
@@ -1554,9 +1625,13 @@ impl App {
                 let value = &self.edit_fields[0].1;
                 if binary_mode {
                     let bytes = encode_values(value, bin_dtype, bin_endian)?;
-                    client.set_bytes(&self.edit_key, &bytes).map_err(|e| e.to_string())
+                    client
+                        .set_bytes(&self.edit_key, &bytes)
+                        .map_err(|e| e.to_string())
                 } else {
-                    client.set_string(&self.edit_key, value).map_err(|e| e.to_string())
+                    client
+                        .set_string(&self.edit_key, value)
+                        .map_err(|e| e.to_string())
                 }
             }
             EditOperation::HSet => {
@@ -1567,18 +1642,26 @@ impl App {
                 }
                 if binary_mode {
                     let bytes = encode_values(value, bin_dtype, bin_endian)?;
-                    client.hset_bytes(&self.edit_key, field, &bytes).map_err(|e| e.to_string())
+                    client
+                        .hset_bytes(&self.edit_key, field, &bytes)
+                        .map_err(|e| e.to_string())
                 } else {
-                    client.hset(&self.edit_key, field, value).map_err(|e| e.to_string())
+                    client
+                        .hset(&self.edit_key, field, value)
+                        .map_err(|e| e.to_string())
                 }
             }
             EditOperation::RPush => {
                 let value = &self.edit_fields[0].1;
                 if binary_mode {
                     let bytes = encode_values(value, bin_dtype, bin_endian)?;
-                    client.rpush_bytes(&self.edit_key, &bytes).map_err(|e| e.to_string())
+                    client
+                        .rpush_bytes(&self.edit_key, &bytes)
+                        .map_err(|e| e.to_string())
                 } else {
-                    client.rpush(&self.edit_key, value).map_err(|e| e.to_string())
+                    client
+                        .rpush(&self.edit_key, value)
+                        .map_err(|e| e.to_string())
                 }
             }
             EditOperation::LSet => {
@@ -1589,18 +1672,26 @@ impl App {
                 let value = &self.edit_fields[1].1;
                 if binary_mode {
                     let bytes = encode_values(value, bin_dtype, bin_endian)?;
-                    client.lset_bytes(&self.edit_key, index, &bytes).map_err(|e| e.to_string())
+                    client
+                        .lset_bytes(&self.edit_key, index, &bytes)
+                        .map_err(|e| e.to_string())
                 } else {
-                    client.lset(&self.edit_key, index, value).map_err(|e| e.to_string())
+                    client
+                        .lset(&self.edit_key, index, value)
+                        .map_err(|e| e.to_string())
                 }
             }
             EditOperation::SAdd => {
                 let member = &self.edit_fields[0].1;
                 if binary_mode {
                     let bytes = encode_values(member, bin_dtype, bin_endian)?;
-                    client.sadd_bytes(&self.edit_key, &bytes).map_err(|e| e.to_string())
+                    client
+                        .sadd_bytes(&self.edit_key, &bytes)
+                        .map_err(|e| e.to_string())
                 } else {
-                    client.sadd(&self.edit_key, member).map_err(|e| e.to_string())
+                    client
+                        .sadd(&self.edit_key, member)
+                        .map_err(|e| e.to_string())
                 }
             }
             EditOperation::ZAdd => {
@@ -1611,9 +1702,13 @@ impl App {
                 let member = &self.edit_fields[1].1;
                 if binary_mode {
                     let bytes = encode_values(member, bin_dtype, bin_endian)?;
-                    client.zadd_bytes(&self.edit_key, score, &bytes).map_err(|e| e.to_string())
+                    client
+                        .zadd_bytes(&self.edit_key, score, &bytes)
+                        .map_err(|e| e.to_string())
                 } else {
-                    client.zadd(&self.edit_key, score, member).map_err(|e| e.to_string())
+                    client
+                        .zadd(&self.edit_key, score, member)
+                        .map_err(|e| e.to_string())
                 }
             }
             EditOperation::XAdd => {
@@ -1624,9 +1719,13 @@ impl App {
                 }
                 if binary_mode {
                     let bytes = encode_values(value, bin_dtype, bin_endian)?;
-                    client.xadd_binary(&self.edit_key, field, &bytes).map_err(|e| e.to_string())
+                    client
+                        .xadd_binary(&self.edit_key, field, &bytes)
+                        .map_err(|e| e.to_string())
                 } else {
-                    client.xadd(&self.edit_key, field, value).map_err(|e| e.to_string())
+                    client
+                        .xadd(&self.edit_key, field, value)
+                        .map_err(|e| e.to_string())
                 }
             }
             EditOperation::SetTTL => {
@@ -1662,11 +1761,17 @@ impl App {
                     let bytes = encode_values(value, bin_dtype, bin_endian)?;
                     match key_type {
                         "string" => client.set_bytes(key, &bytes).map_err(|e| e.to_string()),
-                        "hash" => client.hset_bytes(key, "field", &bytes).map_err(|e| e.to_string()),
+                        "hash" => client
+                            .hset_bytes(key, "field", &bytes)
+                            .map_err(|e| e.to_string()),
                         "list" => client.rpush_bytes(key, &bytes).map_err(|e| e.to_string()),
                         "set" => client.sadd_bytes(key, &bytes).map_err(|e| e.to_string()),
-                        "zset" => client.zadd_bytes(key, 0.0, &bytes).map_err(|e| e.to_string()),
-                        "stream" => client.xadd_binary(key, "data", &bytes).map_err(|e| e.to_string()),
+                        "zset" => client
+                            .zadd_bytes(key, 0.0, &bytes)
+                            .map_err(|e| e.to_string()),
+                        "stream" => client
+                            .xadd_binary(key, "data", &bytes)
+                            .map_err(|e| e.to_string()),
                         _ => Err(format!("Unknown type: {}", key_type)),
                     }
                 } else {
@@ -1794,14 +1899,30 @@ pub fn encode_wave_sample(val: f64, data_type: DataType, endianness: Endianness)
     match (data_type, endianness) {
         (DataType::Int8, _) => vec![(val.clamp(-128.0, 127.0) as i8) as u8],
         (DataType::UInt8, _) => vec![val.clamp(0.0, 255.0) as u8],
-        (DataType::Int16, Endianness::Little) => (val.clamp(-32768.0, 32767.0) as i16).to_le_bytes().to_vec(),
-        (DataType::Int16, Endianness::Big) => (val.clamp(-32768.0, 32767.0) as i16).to_be_bytes().to_vec(),
-        (DataType::UInt16, Endianness::Little) => (val.clamp(0.0, 65535.0) as u16).to_le_bytes().to_vec(),
-        (DataType::UInt16, Endianness::Big) => (val.clamp(0.0, 65535.0) as u16).to_be_bytes().to_vec(),
-        (DataType::Int32, Endianness::Little) => (val.clamp(-2147483648.0, 2147483647.0) as i32).to_le_bytes().to_vec(),
-        (DataType::Int32, Endianness::Big) => (val.clamp(-2147483648.0, 2147483647.0) as i32).to_be_bytes().to_vec(),
-        (DataType::UInt32, Endianness::Little) => (val.clamp(0.0, 4294967295.0) as u32).to_le_bytes().to_vec(),
-        (DataType::UInt32, Endianness::Big) => (val.clamp(0.0, 4294967295.0) as u32).to_be_bytes().to_vec(),
+        (DataType::Int16, Endianness::Little) => {
+            (val.clamp(-32768.0, 32767.0) as i16).to_le_bytes().to_vec()
+        }
+        (DataType::Int16, Endianness::Big) => {
+            (val.clamp(-32768.0, 32767.0) as i16).to_be_bytes().to_vec()
+        }
+        (DataType::UInt16, Endianness::Little) => {
+            (val.clamp(0.0, 65535.0) as u16).to_le_bytes().to_vec()
+        }
+        (DataType::UInt16, Endianness::Big) => {
+            (val.clamp(0.0, 65535.0) as u16).to_be_bytes().to_vec()
+        }
+        (DataType::Int32, Endianness::Little) => (val.clamp(-2147483648.0, 2147483647.0) as i32)
+            .to_le_bytes()
+            .to_vec(),
+        (DataType::Int32, Endianness::Big) => (val.clamp(-2147483648.0, 2147483647.0) as i32)
+            .to_be_bytes()
+            .to_vec(),
+        (DataType::UInt32, Endianness::Little) => {
+            (val.clamp(0.0, 4294967295.0) as u32).to_le_bytes().to_vec()
+        }
+        (DataType::UInt32, Endianness::Big) => {
+            (val.clamp(0.0, 4294967295.0) as u32).to_be_bytes().to_vec()
+        }
         (DataType::Float32, Endianness::Little) => (val as f32).to_le_bytes().to_vec(),
         (DataType::Float32, Endianness::Big) => (val as f32).to_be_bytes().to_vec(),
         (DataType::Float64, Endianness::Little) => val.to_le_bytes().to_vec(),
@@ -1827,7 +1948,11 @@ pub fn generate_wave_blob(config: &SignalGenConfig, time_offset: f64) -> Vec<u8>
         let raw = match config.wave_type.as_str() {
             "sine" => (2.0 * std::f64::consts::PI * phase).sin(),
             "square" => {
-                if (2.0 * std::f64::consts::PI * phase).sin() >= 0.0 { 1.0 } else { -1.0 }
+                if (2.0 * std::f64::consts::PI * phase).sin() >= 0.0 {
+                    1.0
+                } else {
+                    -1.0
+                }
             }
             "sawtooth" => 2.0 * (phase.fract() + 1.0).fract() - 1.0,
             "triangle" => {
@@ -1850,7 +1975,11 @@ pub fn generate_wave_blob(config: &SignalGenConfig, time_offset: f64) -> Vec<u8>
     blob
 }
 
-fn format_stream_entries(entries: &[StreamEntry], data_type: DataType, endianness: Endianness) -> Vec<String> {
+fn format_stream_entries(
+    entries: &[StreamEntry],
+    data_type: DataType,
+    endianness: Endianness,
+) -> Vec<String> {
     let mut lines = Vec::new();
     let total = entries.len();
     // Show only last 5 entries (newest first)
@@ -1867,19 +1996,26 @@ fn format_stream_entries(entries: &[StreamEntry], data_type: DataType, endiannes
                 // Binary data field - show decoded values + hex summary
                 let decoded = decode_blob(fval, data_type, endianness);
                 if !decoded.is_empty() {
-                    let preview: Vec<String> = decoded.iter().take(8).map(|v| {
-                        match data_type {
+                    let preview: Vec<String> = decoded
+                        .iter()
+                        .take(8)
+                        .map(|v| match data_type {
                             DataType::Float32 | DataType::Float64 => format!("{:.4}", v),
                             _ => format!("{}", *v as i64),
-                        }
-                    }).collect();
+                        })
+                        .collect();
                     let suffix = if decoded.len() > 8 {
                         format!(" ..({} vals)", decoded.len())
                     } else {
                         String::new()
                     };
-                    lines.push(format!("  {} [{}]: [{}]{}",
-                        fname, data_type, preview.join(", "), suffix));
+                    lines.push(format!(
+                        "  {} [{}]: [{}]{}",
+                        fname,
+                        data_type,
+                        preview.join(", "),
+                        suffix
+                    ));
                 }
                 // Hex summary
                 let hex: String = fval
@@ -1993,8 +2129,16 @@ fn auto_bounds(data: &[f64]) -> (f64, f64) {
     if data.is_empty() {
         return (0.0, 1.0);
     }
-    let y_min = data.iter().copied().filter(|v| v.is_finite()).fold(f64::INFINITY, f64::min);
-    let y_max = data.iter().copied().filter(|v| v.is_finite()).fold(f64::NEG_INFINITY, f64::max);
+    let y_min = data
+        .iter()
+        .copied()
+        .filter(|v| v.is_finite())
+        .fold(f64::INFINITY, f64::min);
+    let y_max = data
+        .iter()
+        .copied()
+        .filter(|v| v.is_finite())
+        .fold(f64::NEG_INFINITY, f64::max);
     // If all values were non-finite, return safe defaults
     if !y_min.is_finite() || !y_max.is_finite() || y_min > y_max {
         return (0.0, 1.0);
@@ -2029,10 +2173,7 @@ pub fn compute_fft_magnitude(data: &[f64]) -> Vec<f64> {
 
     let half = n / 2;
     let inv_n = 1.0 / n as f64;
-    buffer[..half]
-        .iter()
-        .map(|c| c.norm() * inv_n)
-        .collect()
+    buffer[..half].iter().map(|c| c.norm() * inv_n).collect()
 }
 
 #[cfg(test)]
@@ -2233,7 +2374,10 @@ mod tests {
             // Oldest entries should have been drained — first entry should be "500-0"
             assert_eq!(entries[0].id, "500-0");
             // Last entry should be the newest appended
-            assert_eq!(entries.last().unwrap().id, format!("{}-0", MAX_STREAM_ENTRIES + 499));
+            assert_eq!(
+                entries.last().unwrap().id,
+                format!("{}-0", MAX_STREAM_ENTRIES + 499)
+            );
         } else {
             panic!("expected Stream value");
         }
@@ -2241,43 +2385,67 @@ mod tests {
 
     #[test]
     fn format_stream_entries_uint8_printable_ascii() {
-        use crate::redis_client::StreamEntry;
         use crate::data::{DataType, Endianness};
+        use crate::redis_client::StreamEntry;
 
         // Create stream entry with uint8 data in printable ASCII range (65-90 = 'A'-'Z')
         let entries = vec![StreamEntry {
             id: "1000-0".to_string(),
-            fields: vec![
-                ("_waveform".to_string(), vec![65, 66, 67, 68, 69]),
-            ],
+            fields: vec![("_waveform".to_string(), vec![65, 66, 67, 68, 69])],
         }];
         let result = format_stream_entries(&entries, DataType::UInt8, Endianness::Little);
         let joined = result.join("\n");
         // Should contain decoded numeric values, not ASCII text
-        assert!(joined.contains("[uint8]"), "should show data type label, got:\n{}", joined);
-        assert!(joined.contains("65"), "should contain decoded value 65, got:\n{}", joined);
-        assert!(joined.contains("hex"), "should contain hex dump, got:\n{}", joined);
+        assert!(
+            joined.contains("[uint8]"),
+            "should show data type label, got:\n{}",
+            joined
+        );
+        assert!(
+            joined.contains("65"),
+            "should contain decoded value 65, got:\n{}",
+            joined
+        );
+        assert!(
+            joined.contains("hex"),
+            "should contain hex dump, got:\n{}",
+            joined
+        );
         // Should NOT contain the ASCII interpretation 'ABCDE'
-        assert!(!joined.contains("ABCDE"), "should not show ASCII text, got:\n{}", joined);
+        assert!(
+            !joined.contains("ABCDE"),
+            "should not show ASCII text, got:\n{}",
+            joined
+        );
     }
 
     #[test]
     fn format_stream_entries_uint16_data() {
-        use crate::redis_client::StreamEntry;
         use crate::data::{DataType, Endianness};
+        use crate::redis_client::StreamEntry;
 
         // Create uint16 LE data: 256 = [0x00, 0x01], 512 = [0x00, 0x02]
         let entries = vec![StreamEntry {
             id: "1000-0".to_string(),
-            fields: vec![
-                ("_data".to_string(), vec![0x00, 0x01, 0x00, 0x02]),
-            ],
+            fields: vec![("_data".to_string(), vec![0x00, 0x01, 0x00, 0x02])],
         }];
         let result = format_stream_entries(&entries, DataType::UInt16, Endianness::Little);
         let joined = result.join("\n");
-        assert!(joined.contains("[uint16]"), "should show uint16 label, got:\n{}", joined);
-        assert!(joined.contains("256"), "should contain decoded value 256, got:\n{}", joined);
-        assert!(joined.contains("512"), "should contain decoded value 512, got:\n{}", joined);
+        assert!(
+            joined.contains("[uint16]"),
+            "should show uint16 label, got:\n{}",
+            joined
+        );
+        assert!(
+            joined.contains("256"),
+            "should contain decoded value 256, got:\n{}",
+            joined
+        );
+        assert!(
+            joined.contains("512"),
+            "should contain decoded value 512, got:\n{}",
+            joined
+        );
     }
 
     // ── RateTracker tests ──────────────────────────────────────────────────────
@@ -2348,7 +2516,10 @@ mod tests {
         app.update_rate_tracker("k", &entries, base_ms);
 
         let tracker = app.rate_trackers.get("k").unwrap();
-        assert!(tracker.rate_history.is_empty(), "rate_history should be empty during warmup");
+        assert!(
+            tracker.rate_history.is_empty(),
+            "rate_history should be empty during warmup"
+        );
         assert!(tracker.tracking_start_ms.is_some());
     }
 
@@ -2368,7 +2539,10 @@ mod tests {
         app.update_rate_tracker("k", &batch2, now2);
 
         let tracker = app.rate_trackers.get("k").unwrap();
-        assert!(!tracker.rate_history.is_empty(), "should have recorded rate after warmup elapsed");
+        assert!(
+            !tracker.rate_history.is_empty(),
+            "should have recorded rate after warmup elapsed"
+        );
     }
 
     #[test]
@@ -2385,7 +2559,7 @@ mod tests {
         // Jump of 2000ms from last entry (base+29900ms → base+31900ms)
         // gap_ms = 2000ms > threshold 500ms → gap detected
         let last_ms = base_ms + 299 * 100; // base + 29900
-        let gap_start = last_ms + 2000;    // base + 31900
+        let gap_start = last_ms + 2000; // base + 31900
         let now2 = base_ms + 35_000;
         let batch2: Vec<_> = (0..5).map(|i| make_entry(gap_start + i * 100)).collect();
         app.update_rate_tracker("k", &batch2, now2);
@@ -2419,7 +2593,10 @@ mod tests {
         app.update_rate_tracker("k", &batch2, now2);
 
         let tracker = app.rate_trackers.get("k").unwrap();
-        assert!(!tracker.gaps.contains(&old_gap), "old gap should have been pruned");
+        assert!(
+            !tracker.gaps.contains(&old_gap),
+            "old gap should have been pruned"
+        );
     }
 
     #[test]

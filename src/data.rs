@@ -160,11 +160,9 @@ pub fn format_blob(bytes: &[u8], data_type: DataType, endianness: Endianness) ->
             }
             let formatted: Vec<String> = values
                 .iter()
-                .map(|v| {
-                    match data_type {
-                        DataType::Float32 | DataType::Float64 => format!("{:.6}", v),
-                        _ => format!("{}", *v as i64),
-                    }
+                .map(|v| match data_type {
+                    DataType::Float32 | DataType::Float64 => format!("{:.6}", v),
+                    _ => format!("{}", *v as i64),
                 })
                 .collect();
             formatted.join(", ")
@@ -209,7 +207,11 @@ pub fn format_hex(bytes: &[u8]) -> String {
 
 /// Encode a string of comma/space-separated numeric values into binary bytes.
 /// Supports ints and floats depending on the target DataType.
-pub fn encode_values(input: &str, data_type: DataType, endianness: Endianness) -> Result<Vec<u8>, String> {
+pub fn encode_values(
+    input: &str,
+    data_type: DataType,
+    endianness: Endianness,
+) -> Result<Vec<u8>, String> {
     let tokens: Vec<&str> = input
         .split([',', ' '])
         .map(|s| s.trim())
@@ -225,50 +227,66 @@ pub fn encode_values(input: &str, data_type: DataType, endianness: Endianness) -
     for token in &tokens {
         match data_type {
             DataType::Int8 => {
-                let v: i8 = token.parse().map_err(|_| format!("'{}' is not a valid i8", token))?;
+                let v: i8 = token
+                    .parse()
+                    .map_err(|_| format!("'{}' is not a valid i8", token))?;
                 bytes.push(v as u8);
             }
             DataType::UInt8 => {
-                let v: u8 = token.parse().map_err(|_| format!("'{}' is not a valid u8", token))?;
+                let v: u8 = token
+                    .parse()
+                    .map_err(|_| format!("'{}' is not a valid u8", token))?;
                 bytes.push(v);
             }
             DataType::Int16 => {
-                let v: i16 = token.parse().map_err(|_| format!("'{}' is not a valid i16", token))?;
+                let v: i16 = token
+                    .parse()
+                    .map_err(|_| format!("'{}' is not a valid i16", token))?;
                 match endianness {
                     Endianness::Little => bytes.extend_from_slice(&v.to_le_bytes()),
                     Endianness::Big => bytes.extend_from_slice(&v.to_be_bytes()),
                 }
             }
             DataType::UInt16 => {
-                let v: u16 = token.parse().map_err(|_| format!("'{}' is not a valid u16", token))?;
+                let v: u16 = token
+                    .parse()
+                    .map_err(|_| format!("'{}' is not a valid u16", token))?;
                 match endianness {
                     Endianness::Little => bytes.extend_from_slice(&v.to_le_bytes()),
                     Endianness::Big => bytes.extend_from_slice(&v.to_be_bytes()),
                 }
             }
             DataType::Int32 => {
-                let v: i32 = token.parse().map_err(|_| format!("'{}' is not a valid i32", token))?;
+                let v: i32 = token
+                    .parse()
+                    .map_err(|_| format!("'{}' is not a valid i32", token))?;
                 match endianness {
                     Endianness::Little => bytes.extend_from_slice(&v.to_le_bytes()),
                     Endianness::Big => bytes.extend_from_slice(&v.to_be_bytes()),
                 }
             }
             DataType::UInt32 => {
-                let v: u32 = token.parse().map_err(|_| format!("'{}' is not a valid u32", token))?;
+                let v: u32 = token
+                    .parse()
+                    .map_err(|_| format!("'{}' is not a valid u32", token))?;
                 match endianness {
                     Endianness::Little => bytes.extend_from_slice(&v.to_le_bytes()),
                     Endianness::Big => bytes.extend_from_slice(&v.to_be_bytes()),
                 }
             }
             DataType::Float32 => {
-                let v: f32 = token.parse().map_err(|_| format!("'{}' is not a valid f32", token))?;
+                let v: f32 = token
+                    .parse()
+                    .map_err(|_| format!("'{}' is not a valid f32", token))?;
                 match endianness {
                     Endianness::Little => bytes.extend_from_slice(&v.to_le_bytes()),
                     Endianness::Big => bytes.extend_from_slice(&v.to_be_bytes()),
                 }
             }
             DataType::Float64 => {
-                let v: f64 = token.parse().map_err(|_| format!("'{}' is not a valid f64", token))?;
+                let v: f64 = token
+                    .parse()
+                    .map_err(|_| format!("'{}' is not a valid f64", token))?;
                 match endianness {
                     Endianness::Little => bytes.extend_from_slice(&v.to_le_bytes()),
                     Endianness::Big => bytes.extend_from_slice(&v.to_be_bytes()),
@@ -285,7 +303,9 @@ pub fn encode_values(input: &str, data_type: DataType, endianness: Endianness) -
 
 /// Check if bytes look like they contain binary (non-UTF8 or control chars)
 pub fn is_binary(bytes: &[u8]) -> bool {
-    bytes.iter().any(|&b| b < 0x20 && b != b'\n' && b != b'\r' && b != b'\t')
+    bytes
+        .iter()
+        .any(|&b| b < 0x20 && b != b'\n' && b != b'\r' && b != b'\t')
 }
 
 #[cfg(test)]
@@ -405,9 +425,8 @@ mod tests {
 
     #[test]
     fn decode_chunks_exact_fit() {
-        let result: Vec<f64> = decode_chunks(&[1, 0, 2, 0], |arr: [u8; 2]| {
-            u16::from_le_bytes(arr) as f64
-        });
+        let result: Vec<f64> =
+            decode_chunks(&[1, 0, 2, 0], |arr: [u8; 2]| u16::from_le_bytes(arr) as f64);
         assert_eq!(result, vec![1.0, 2.0]);
     }
 
@@ -422,9 +441,7 @@ mod tests {
 
     #[test]
     fn decode_chunks_empty() {
-        let result: Vec<f64> = decode_chunks(&[], |arr: [u8; 4]| {
-            f32::from_le_bytes(arr) as f64
-        });
+        let result: Vec<f64> = decode_chunks(&[], |arr: [u8; 4]| f32::from_le_bytes(arr) as f64);
         assert!(result.is_empty());
     }
 
