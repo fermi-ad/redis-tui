@@ -28,6 +28,97 @@ jobs:
           VERSION=$(grep -m1 '^version' Cargo.toml | sed 's/version = "\(.*\)"/\1/')
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
 
+      # Temporary diagnostic for the persistent login failure. Reports only the
+      # SHAPE of the credentials and what the registry says back - never their
+      # values. Remove once the publish is working.
+      - name: Diagnose registry credentials
+        env:
+          REG_USER: ${{ secrets.ADREGISTRY_INST_USERNAME }}
+          REG_PASS: ${{ secrets.ADREGISTRY_INST_SECRET }}
+        run: |
+          set -uo pipefail
+
+          shape() {
+            local label="$1" val="$2"
+            if [ -z "$val" ]; then
+              echo "  $label: NOT SET (empty)"
+              return
+            fi
+            local trimmed
+            trimmed="$(printf '%s' "$val" | tr -d '[:space:]')"
+            echo "  $label: set, length=${#val}, length_without_whitespace=${#trimmed}"
+            if [ "${#val}" -ne "${#trimmed}" ]; then
+              echo "    WARNING: contains whitespace/newline - a stray newline when"
+              echo "    the secret was pasted is a common cause of 401s."
+            fi
+          }
+
+          echo "Registry: $REGISTRY"
+          echo "Credential shape (values are never printed):"
+          shape "ADREGISTRY_INST_USERNAME" "$REG_USER"
+          shape "ADREGISTRY_INST_SECRET  " "$REG_PASS"
+
+          echo
+          echo "Step 1: is the registry reachable, and what auth does it advertise?"
+          hdrs="$(curl -sS -D - -o /dev/null --max-time 30 "https://$REGISTRY/v2/" 2>&1)" || {
+            echo "  could not reach https://$REGISTRY/v2/"
+            echo "$hdrs" | sed 's/^/    /'
+            exit 0
+          }
+          echo "$hdrs" | grep -iE "^HTTP/|^www-authenticate:" | sed 's/^/  /'
+
+          realm="$(echo "$hdrs"   | grep -i '^www-authenticate:' | sed -n 's/.*realm="\([^"]*\)".*/\1/p')"
+          service="$(echo "$hdrs" | grep -i '^www-authenticate:' | sed -n 's/.*service="\([^"]*\)".*/\1/p')"
+          echo "  realm=${realm:-<none>}  service=${service:-<none>}"
+
+          if [ -z "$realm" ]; then
+            echo "  no token realm advertised - cannot test credentials further."
+            exit 0
+          fi
+
+          echo
+          echo "Step 2: can these credentials get a push-scoped token for the image?"
+          scope="repository:${IMAGE#*/}:pull,push"
+          echo "  scope=$scope"
+          code="$(curl -sS -o /tmp/token.json -w '%{http_code}' --max-time 30 \
+                    -u "$REG_USER:$REG_PASS" \
+                    "$realm?service=${service}&scope=${scope}" 2>/dev/null)" || code="curl-failed"
+          echo "  HTTP $code"
+
+          case "$code" in
+            200)
+              # Never print the token itself - only whether one came back.
+              if grep -q '"token"' /tmp/token.json 2>/dev/null; then
+                echo "  A push-scoped token WAS issued: the credentials are valid and"
+                echo "  have push rights. If docker login still fails, the problem is"
+                echo "  in the login step rather than the credentials."
+              else
+                echo "  HTTP 200 but no token field in the response."
+              fi
+              ;;
+            401)
+              echo "  401 - the registry rejected the username/password pair."
+              echo "  Body:"; sed 's/^/    /' /tmp/token.json 2>/dev/null
+              echo "  Likely: wrong or expired secret, or a Harbor robot account name"
+              echo "  that must be given in full (robot\$project+name)."
+              ;;
+            403)
+              echo "  403 - the credentials authenticated but lack push rights on"
+              echo "  ${IMAGE#*/}."
+              echo "  Body:"; sed 's/^/    /' /tmp/token.json 2>/dev/null
+              ;;
+            *)
+              echo "  Body:"; sed 's/^/    /' /tmp/token.json 2>/dev/null
+              ;;
+          esac
+
+          echo
+          echo "Step 3: pull-only scope, to separate authentication from authorisation"
+          pcode="$(curl -sS -o /tmp/token_pull.json -w '%{http_code}' --max-time 30 \
+                     -u "$REG_USER:$REG_PASS" \
+                     "$realm?service=${service}&scope=repository:${IMAGE#*/}:pull" 2>/dev/null)" || pcode="curl-failed"
+          echo "  HTTP $pcode (200 here but not above => authentication fine, push permission missing)"
+
       - name: Log in to Harbor
         if: env.REGISTRY_USERNAME != ''
         uses: docker/login-action@v3
