@@ -113,6 +113,22 @@ jobs:
           esac
 
           echo
+          echo "Step 4: UNSCOPED token - this is exactly what \`docker login\` requests."
+          echo "  A Harbor robot account is scoped to a project and often cannot get a"
+          echo "  global token, which makes login fail even though scoped pushes work."
+          ucode="$(curl -sS -o /tmp/token_none.json -w '%{http_code}' --max-time 30 \
+                     -u "$REG_USER:$REG_PASS" \
+                     "$realm?service=${service}" 2>/dev/null)" || ucode="curl-failed"
+          echo "  HTTP $ucode"
+          if [ "$ucode" != "200" ]; then
+            echo "  Body:"; sed 's/^/    /' /tmp/token_none.json 2>/dev/null
+            echo "  => CONFIRMS the diagnosis: scoped requests succeed, unscoped fails,"
+            echo "     so docker login cannot validate even though a push would work."
+          else
+            echo "  => unscoped auth works too, so the login failure is elsewhere."
+          fi
+
+          echo
           echo "Step 3: pull-only scope, to separate authentication from authorisation"
           pcode="$(curl -sS -o /tmp/token_pull.json -w '%{http_code}' --max-time 30 \
                      -u "$REG_USER:$REG_PASS" \
