@@ -147,7 +147,9 @@ jobs:
           pcode="$(curl -sS -o /tmp/token_pull.json -w '%{http_code}' --max-time 30 \
                      -u "$REG_USER:$REG_PASS" \
                      "$realm?service=${service}&scope=repository:${IMAGE#*/}:pull" 2>/dev/null)" || pcode="curl-failed"
-          echo "  HTTP $pcode (200 here but not above => authentication fine, push permission missing)"
+          echo "  HTTP $pcode"
+          echo "  (The decisive signal is the GRANTED line in step 2, not these status"
+          echo "   codes - Harbor answers 200 and simply omits the actions it withheld.)"
 
       # NOT `docker login`. Harbor robot accounts are scoped to a project and
       # cannot obtain the *unscoped* token that `docker login` requests to
