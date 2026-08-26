@@ -87,13 +87,27 @@ jobs:
 
           case "$code" in
             200)
-              # Never print the token itself - only whether one came back.
-              if grep -q '"token"' /tmp/token.json 2>/dev/null; then
-                echo "  A push-scoped token WAS issued: the credentials are valid and"
-                echo "  have push rights. If docker login still fails, the problem is"
-                echo "  in the login step rather than the credentials."
-              else
+              # HTTP 200 does NOT mean the requested scope was granted. The token
+              # server returns a token carrying the scopes it actually granted,
+              # which may be narrower than requested - or empty. The decisive
+              # check is the "access" claim inside the token, not the status code.
+              tok="$(jq -r '.token // .access_token // empty' /tmp/token.json 2>/dev/null)"
+              if [ -z "$tok" ]; then
                 echo "  HTTP 200 but no token field in the response."
+              else
+                body="$(echo "$tok" | cut -d. -f2)"
+                pad=$(( (4 - ${#body} % 4) % 4 ))
+                [ "$pad" -gt 0 ] && body="${body}$(printf '=%.0s' $(seq 1 "$pad"))"
+                claims="$(echo "$body" | tr '_-' '/+' | base64 -d 2>/dev/null)"
+                granted="$(echo "$claims" | jq -r '.access[]? | "  GRANTED: \(.type):\(.name) -> \(.actions | join(","))"' 2>/dev/null)"
+                if [ -z "$granted" ]; then
+                  echo "  GRANTED: nothing - the access claim is EMPTY."
+                  echo "  => the credential authenticated, but Harbor granted it no rights"
+                  echo "     on this repository. That is why the push is refused despite"
+                  echo "     the 200. This is a permissions problem, not a login problem."
+                else
+                  echo "$granted"
+                fi
               fi
               ;;
             401)
