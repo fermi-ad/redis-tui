@@ -12,11 +12,15 @@ env:
 
 jobs:
   build-and-push:
-    runs-on: ubuntu-latest
-    env:
-      # Mirrored into env so step-level `if:` can test it - secrets are not
-      # available directly in an `if:` expression.
-      REGISTRY_USERNAME: ${{ secrets.ADREGISTRY_INST_USERNAME }}
+    # Must be the self-hosted runner. adregistry.fnal.gov grants push only from
+    # inside the FNAL network: from GitHub's cloud runners the same robot
+    # credential authenticates fine but is granted `pull` only, so every push
+    # from ubuntu-latest failed with "unauthorized ... action: push".
+    #
+    # This matches redis-pvxs-ioc, whose registry jobs all run on adlinux3 and
+    # succeed; its ci-image.yml uses a cloud runner for pull requests and
+    # adlinux3 for anything that touches the registry.
+    runs-on: adlinux3
 
     steps:
       - name: Checkout
@@ -28,177 +32,50 @@ jobs:
           VERSION=$(grep -m1 '^version' Cargo.toml | sed 's/version = "\(.*\)"/\1/')
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
 
-      # Temporary diagnostic for the persistent login failure. Reports only the
-      # SHAPE of the credentials and what the registry says back - never their
-      # values. Remove once the publish is working.
-      - name: Diagnose registry credentials
-        env:
-          REG_USER: ${{ secrets.ADREGISTRY_INST_USERNAME }}
-          REG_PASS: ${{ secrets.ADREGISTRY_INST_SECRET }}
-        run: |
-          set -uo pipefail
-
-          shape() {
-            local label="$1" val="$2"
-            if [ -z "$val" ]; then
-              echo "  $label: NOT SET (empty)"
-              return
-            fi
-            local trimmed
-            trimmed="$(printf '%s' "$val" | tr -d '[:space:]')"
-            echo "  $label: set, length=${#val}, length_without_whitespace=${#trimmed}"
-            if [ "${#val}" -ne "${#trimmed}" ]; then
-              echo "    WARNING: contains whitespace/newline - a stray newline when"
-              echo "    the secret was pasted is a common cause of 401s."
-            fi
-          }
-
-          echo "Registry: $REGISTRY"
-          echo "Credential shape (values are never printed):"
-          shape "ADREGISTRY_INST_USERNAME" "$REG_USER"
-          shape "ADREGISTRY_INST_SECRET  " "$REG_PASS"
-
-          echo
-          echo "Step 1: is the registry reachable, and what auth does it advertise?"
-          hdrs="$(curl -sS -D - -o /dev/null --max-time 30 "https://$REGISTRY/v2/" 2>&1)" || {
-            echo "  could not reach https://$REGISTRY/v2/"
-            echo "$hdrs" | sed 's/^/    /'
-            exit 0
-          }
-          echo "$hdrs" | grep -iE "^HTTP/|^www-authenticate:" | sed 's/^/  /'
-
-          realm="$(echo "$hdrs"   | grep -i '^www-authenticate:' | sed -n 's/.*realm="\([^"]*\)".*/\1/p')"
-          service="$(echo "$hdrs" | grep -i '^www-authenticate:' | sed -n 's/.*service="\([^"]*\)".*/\1/p')"
-          echo "  realm=${realm:-<none>}  service=${service:-<none>}"
-
-          if [ -z "$realm" ]; then
-            echo "  no token realm advertised - cannot test credentials further."
-            exit 0
-          fi
-
-          echo
-          echo "Step 2: can these credentials get a push-scoped token for the image?"
-          scope="repository:${IMAGE#*/}:pull,push"
-          echo "  scope=$scope"
-          code="$(curl -sS -o /tmp/token.json -w '%{http_code}' --max-time 30 \
-                    -u "$REG_USER:$REG_PASS" \
-                    "$realm?service=${service}&scope=${scope}" 2>/dev/null)" || code="curl-failed"
-          echo "  HTTP $code"
-
-          case "$code" in
-            200)
-              # HTTP 200 does NOT mean the requested scope was granted. The token
-              # server returns a token carrying the scopes it actually granted,
-              # which may be narrower than requested - or empty. The decisive
-              # check is the "access" claim inside the token, not the status code.
-              tok="$(jq -r '.token // .access_token // empty' /tmp/token.json 2>/dev/null)"
-              if [ -z "$tok" ]; then
-                echo "  HTTP 200 but no token field in the response."
-              else
-                body="$(echo "$tok" | cut -d. -f2)"
-                pad=$(( (4 - ${#body} % 4) % 4 ))
-                [ "$pad" -gt 0 ] && body="${body}$(printf '=%.0s' $(seq 1 "$pad"))"
-                claims="$(echo "$body" | tr '_-' '/+' | base64 -d 2>/dev/null)"
-                granted="$(echo "$claims" | jq -r '.access[]? | "  GRANTED: \(.type):\(.name) -> \(.actions | join(","))"' 2>/dev/null)"
-                if [ -z "$granted" ]; then
-                  echo "  GRANTED: nothing - the access claim is EMPTY."
-                  echo "  => the credential authenticated, but Harbor granted it no rights"
-                  echo "     on this repository. That is why the push is refused despite"
-                  echo "     the 200. This is a permissions problem, not a login problem."
-                else
-                  echo "$granted"
-                fi
-              fi
-              ;;
-            401)
-              echo "  401 - the registry rejected the username/password pair."
-              echo "  Body:"; sed 's/^/    /' /tmp/token.json 2>/dev/null
-              echo "  Likely: wrong or expired secret, or a Harbor robot account name"
-              echo "  that must be given in full (robot\$project+name)."
-              ;;
-            403)
-              echo "  403 - the credentials authenticated but lack push rights on"
-              echo "  ${IMAGE#*/}."
-              echo "  Body:"; sed 's/^/    /' /tmp/token.json 2>/dev/null
-              ;;
-            *)
-              echo "  Body:"; sed 's/^/    /' /tmp/token.json 2>/dev/null
-              ;;
-          esac
-
-          echo
-          echo "Step 4: UNSCOPED token - this is exactly what \`docker login\` requests."
-          echo "  A Harbor robot account is scoped to a project and often cannot get a"
-          echo "  global token, which makes login fail even though scoped pushes work."
-          ucode="$(curl -sS -o /tmp/token_none.json -w '%{http_code}' --max-time 30 \
-                     -u "$REG_USER:$REG_PASS" \
-                     "$realm?service=${service}" 2>/dev/null)" || ucode="curl-failed"
-          echo "  HTTP $ucode"
-          if [ "$ucode" != "200" ]; then
-            echo "  Body:"; sed 's/^/    /' /tmp/token_none.json 2>/dev/null
-            echo "  => CONFIRMS the diagnosis: scoped requests succeed, unscoped fails,"
-            echo "     so docker login cannot validate even though a push would work."
-          else
-            echo "  => unscoped auth works too, so the login failure is elsewhere."
-          fi
-
-          echo
-          echo "Step 3: pull-only scope, to separate authentication from authorisation"
-          pcode="$(curl -sS -o /tmp/token_pull.json -w '%{http_code}' --max-time 30 \
-                     -u "$REG_USER:$REG_PASS" \
-                     "$realm?service=${service}&scope=repository:${IMAGE#*/}:pull" 2>/dev/null)" || pcode="curl-failed"
-          echo "  HTTP $pcode"
-          echo "  (The decisive signal is the GRANTED line in step 2, not these status"
-          echo "   codes - Harbor answers 200 and simply omits the actions it withheld.)"
-
-      # NOT `docker login`. Harbor robot accounts are scoped to a project and
-      # cannot obtain the *unscoped* token that `docker login` requests to
-      # validate a credential, so login fails with "unauthorized" even when the
-      # account can push. Confirmed against this registry: a token request scoped
-      # to repository:instrumentation/redis-tui:pull,push returns 200, while the
-      # same credential with no scope returns 401.
-      #
-      # Writing the auth straight into the docker config skips that validation.
-      # The push itself requests a scoped token, which this account can get.
-      - name: Configure registry credentials
-        if: env.REGISTRY_USERNAME != ''
-        env:
-          REG_USER: ${{ secrets.ADREGISTRY_INST_USERNAME }}
-          REG_PASS: ${{ secrets.ADREGISTRY_INST_SECRET }}
-        run: |
-          set -uo pipefail
-          auth="$(printf '%s:%s' "$REG_USER" "$REG_PASS" | base64 -w0)"
-          # base64 of a secret is a derived value and is not masked automatically.
-          echo "::add-mask::$auth"
-          mkdir -p ~/.docker
-          printf '{"auths":{"%s":{"auth":"%s"}}}\n' "$REGISTRY" "$auth" > ~/.docker/config.json
-          chmod 600 ~/.docker/config.json
-          echo "Wrote credentials for $REGISTRY to ~/.docker/config.json"
-
       - name: Set image tags
         id: tags
         run: |
-          VERSION=${{ steps.version.outputs.version }}
-          if [ -n "$ACT" ] || { [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ "${{ github.ref_name }}" != "main" ]; }; then
+          VERSION="${{ steps.version.outputs.version }}"
+          if [ "${{ github.ref_name }}" != "main" ]; then
+            # Branch-suffixed tags keep dispatch runs off :latest.
             BRANCH=$(echo "${{ github.ref_name }}" | sed 's|/|-|g')
-            echo "tags=${{ env.IMAGE }}:latest-${BRANCH},${{ env.IMAGE }}:${VERSION}-${BRANCH}" >> "$GITHUB_OUTPUT"
+            echo "primary=${IMAGE}:${VERSION}-${BRANCH}" >> "$GITHUB_OUTPUT"
+            echo "moving=${IMAGE}:latest-${BRANCH}" >> "$GITHUB_OUTPUT"
           else
-            echo "tags=${{ env.IMAGE }}:latest,${{ env.IMAGE }}:${VERSION}" >> "$GITHUB_OUTPUT"
+            echo "primary=${IMAGE}:${VERSION}" >> "$GITHUB_OUTPUT"
+            echo "moving=${IMAGE}:latest" >> "$GITHUB_OUTPUT"
           fi
 
-      # `push` is gated on the same condition as the login above. Previously the
-      # login skipped itself when the credential was absent but this pushed
-      # unconditionally, so a missing secret surfaced as an `unauthorized` error
-      # after a full image build rather than as a clear skip.
-      - name: Build and push
-        uses: docker/build-push-action@v6
-        with:
-          context: .
-          push: ${{ env.REGISTRY_USERNAME != '' }}
-          platforms: linux/amd64
-          tags: ${{ steps.tags.outputs.tags }}
-
-      - name: Warn if the push was skipped
-        if: env.REGISTRY_USERNAME == ''
+      # Plain docker login/build/push rather than buildx and
+      # docker/build-push-action - the same commands redis-pvxs-ioc uses, and
+      # they do not assume buildx is set up on the self-hosted runner.
+      - name: Registry login
         run: |
-          echo "::warning::ADREGISTRY_INST_USERNAME is not set - image was built but not pushed."
+          printf '%s' "${{ secrets.ADREGISTRY_INST_SECRET }}" \
+            | docker login "$REGISTRY" \
+                --username "${{ secrets.ADREGISTRY_INST_USERNAME }}" \
+                --password-stdin
+
+      - name: Build and push
+        run: |
+          PRIMARY="${{ steps.tags.outputs.primary }}"
+          MOVING="${{ steps.tags.outputs.moving }}"
+
+          docker build --platform linux/amd64 -t "$PRIMARY" -t "$MOVING" .
+          docker push "$PRIMARY"
+          docker push "$MOVING"
+
+          DIGEST_REF="$(docker image inspect "$PRIMARY" \
+            --format '{{range .RepoDigests}}{{println .}}{{end}}' \
+            | grep -F "${IMAGE}@sha256:" | head -n 1)"
+          {
+            echo "### Published"
+            echo
+            echo "- \`$PRIMARY\`"
+            echo "- \`$MOVING\`"
+            echo "- Digest: \`${DIGEST_REF:-unknown}\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Docker logout
+        if: always()
+        run: docker logout "$REGISTRY"
