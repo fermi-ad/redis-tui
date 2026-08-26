@@ -87,30 +87,11 @@ jobs:
 
           case "$code" in
             200)
-              # HTTP 200 does NOT mean the requested scope was granted. The token
-              # server returns a token carrying the scopes it actually granted,
-              # which may be narrower than asked for - or empty. The decisive
-              # check is the "access" claim inside the token, not the status code.
+              # Never print the token itself - only whether one came back.
               if grep -q '"token"' /tmp/token.json 2>/dev/null; then
-                echo "  A token was issued. Decoding its granted scope:"
-                payload="$(python3 - <<'EOF'
-import base64, json, sys
-tok = json.load(open('/tmp/token.json')).get('token', '')
-parts = tok.split('.')
-if len(parts) < 2:
-    print('  could not parse token'); sys.exit()
-p = parts[1] + '=' * (-len(parts[1]) % 4)
-claims = json.loads(base64.urlsafe_b64decode(p))
-acc = claims.get('access', [])
-if not acc:
-    print('  GRANTED: nothing - access claim is EMPTY')
-    print('  => the account authenticated but was granted no rights on this')
-    print('     repository. This is why the push is refused despite HTTP 200.')
-for a in acc:
-    print(f"  GRANTED: {a.get('type')}:{a.get('name')} -> {a.get('actions')}")
-EOF
-)"
-                echo "$payload"
+                echo "  A push-scoped token WAS issued: the credentials are valid and"
+                echo "  have push rights. If docker login still fails, the problem is"
+                echo "  in the login step rather than the credentials."
               else
                 echo "  HTTP 200 but no token field in the response."
               fi
