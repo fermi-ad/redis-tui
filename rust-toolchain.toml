@@ -1,0 +1,12 @@
+# Pinned so CI and local builds agree.
+#
+# CI enforces `cargo clippy -- -D warnings`, which turns every rustc and clippy
+# lint into a build failure. GitHub's runner image ships whatever Rust is current,
+# so without a pin a runner update can fail CI on code nobody touched - which is
+# exactly what happened when the image moved to 1.97 and its stricter dead_code
+# analysis flagged two methods that 1.93 accepted.
+#
+# Bump deliberately, and fix any new lints in the same commit.
+[toolchain]
+channel = "1.97"
+components = ["clippy", "rustfmt"]

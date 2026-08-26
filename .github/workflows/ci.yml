@@ -77,23 +77,19 @@ jobs:
       - name: Test (live Redis)
         run: cargo test --locked -- --ignored
 
+      # Clippy is enforced: the tree is at zero warnings and stays there.
+      - name: Clippy
+        id: clippy
+        run: cargo clippy --locked --all-targets -- -D warnings
+
       # ---- Ratchet: reported, not enforced ----
       #
-      # main carries pre-existing debt that is unrelated to any single change
-      # (12 clippy warnings, 188 rustfmt diffs). Enforcing these now would make CI
-      # red on every PR regardless of its contents, and reformatting the tree to
-      # clear it would bury real diffs in noise.
+      # main still carries ~198 pre-existing rustfmt diffs that belong to no single
+      # change. Enforcing now would make CI red on every PR regardless of its
+      # contents, and reformatting the tree would bury real diffs in noise.
       #
-      # `-D warnings` is deliberate: plain `cargo clippy` exits 0 on warnings, so
-      # without it the step would always pass and the debt would be invisible.
-      # Paired with continue-on-error the step goes red while the job stays green.
-      #
-      # To enforce these later, delete the `continue-on-error` lines. See #64.
-
-      - name: Clippy (reported, not enforced)
-        id: clippy
-        continue-on-error: true
-        run: cargo clippy --locked --all-targets -- -D warnings
+      # To enforce, run `cargo fmt` in a commit of its own, add that SHA to
+      # .git-blame-ignore-revs, and delete the `continue-on-error` below. See #64.
 
       - name: Format check (reported, not enforced)
         id: fmt
@@ -108,9 +104,9 @@ jobs:
             echo
             echo "| Check | Result | Enforced |"
             echo "| ----- | ------ | -------- |"
-            echo "| Clippy | ${{ steps.clippy.outcome }} | no |"
+            echo "| Clippy | ${{ steps.clippy.outcome }} | yes |"
             echo "| Format | ${{ steps.fmt.outcome }} | no |"
             echo
-            echo "Build and tests are enforced. Clippy and format are reported only"
-            echo "while pre-existing debt is cleared - see issue #64."
+            echo "Build, tests and clippy are enforced. Format is reported only"
+            echo "while the pre-existing rustfmt debt is cleared - see issue #64."
           } >> "$GITHUB_STEP_SUMMARY"

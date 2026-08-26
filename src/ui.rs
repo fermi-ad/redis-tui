@@ -298,7 +298,7 @@ fn draw_value_view(frame: &mut Frame, app: &mut App, area: Rect) {
                         let remaining_secs = match tracker.tracking_start_ms {
                             Some(start_ms) => {
                                 let warmup_end_ms = start_ms + chart_window * 1000;
-                                ((warmup_end_ms.saturating_sub(now_ms)) + 999) / 1000
+                                (warmup_end_ms.saturating_sub(now_ms)).div_ceil(1000)
                             }
                             None => chart_window,
                         };
@@ -685,9 +685,9 @@ fn draw_signal_chart(frame: &mut Frame, app: &mut App, area: Rect, title: &str, 
         (-0.05, 1.05)
     } else if !app.plot_slots.is_empty() {
         let slot = &app.plot_slots[0];
-        if slot.y_min.is_some() && slot.y_max.is_some() {
+        if let (Some(y_min), Some(y_max)) = (slot.y_min, slot.y_max) {
             // Manual per-slot limits
-            (slot.y_min.unwrap(), slot.y_max.unwrap())
+            (y_min, y_max)
         } else {
             // Auto: use actual data bounds
             let all_data: Vec<f64> = slot.data.iter().copied()
@@ -872,7 +872,13 @@ fn draw_signal_chart(frame: &mut Frame, app: &mut App, area: Rect, title: &str, 
     // Draw crosshair tick marks if hovering in signal chart
     if !app.hover_in_fft {
         if let (Some(hx), Some(hy)) = (app.hover_data_x, app.hover_data_y) {
-            draw_crosshair(frame, chart_x, chart_y, chart_w, chart_h, hx, hy, x_lo, x_hi, y_lo, y_hi);
+            draw_crosshair(
+                frame,
+                Rect::new(chart_x, chart_y, chart_w, chart_h),
+                hx,
+                hy,
+                ChartBounds { x_lo, x_hi, y_lo, y_hi },
+            );
         }
     }
 }
@@ -1013,7 +1019,13 @@ fn draw_fft_chart(frame: &mut Frame, app: &mut App, area: Rect, _border_color: C
     // Draw crosshair if hovering in FFT chart
     if app.hover_in_fft {
         if let (Some(hx), Some(hy)) = (app.hover_data_x, app.hover_data_y) {
-            draw_crosshair(frame, chart_x, chart_y, chart_w, chart_h, hx, hy, x_lo, x_hi, y_lo, y_hi);
+            draw_crosshair(
+                frame,
+                Rect::new(chart_x, chart_y, chart_w, chart_h),
+                hx,
+                hy,
+                ChartBounds { x_lo, x_hi, y_lo, y_hi },
+            );
         }
     }
 }
@@ -1098,7 +1110,7 @@ fn draw_confirm_popup(frame: &mut Frame, app: &App, area: Rect) {
 }
 
 fn draw_help_popup(frame: &mut Frame, app: &App, area: Rect) {
-    let max_height = area.height.saturating_sub(2).min(50) as u16;
+    let max_height = area.height.saturating_sub(2).min(50);
     let popup_area = centered_rect(72, max_height, area);
     frame.render_widget(Clear, popup_area);
 
@@ -1598,19 +1610,25 @@ fn draw_edit_popup(frame: &mut Frame, app: &App, area: Rect) {
 }
 
 /// Draw crosshair tick marks at the hover position on both axes
-fn draw_crosshair(
-    frame: &mut Frame,
-    cx: u16, cy: u16, cw: u16, ch: u16,
-    data_x: f64, data_y: f64,
-    x_lo: f64, x_hi: f64, y_lo: f64, y_hi: f64,
-) {
+/// Data-space bounds of a chart, used to map a data point onto a cell.
+#[derive(Debug, Clone, Copy)]
+struct ChartBounds {
+    x_lo: f64,
+    x_hi: f64,
+    y_lo: f64,
+    y_hi: f64,
+}
+
+fn draw_crosshair(frame: &mut Frame, area: Rect, data_x: f64, data_y: f64, bounds: ChartBounds) {
+    let (cx, cy, cw, ch) = (area.x, area.y, area.width, area.height);
+    let ChartBounds { x_lo, x_hi, y_lo, y_hi } = bounds;
     if cw <= 1 || ch <= 1 || x_hi <= x_lo || y_hi <= y_lo {
         return;
     }
     let frac_x = (data_x - x_lo) / (x_hi - x_lo);
     let frac_y = (data_y - y_lo) / (y_hi - y_lo);
 
-    if frac_x < 0.0 || frac_x > 1.0 || frac_y < 0.0 || frac_y > 1.0 {
+    if !(0.0..=1.0).contains(&frac_x) || !(0.0..=1.0).contains(&frac_y) {
         return;
     }
 
@@ -1796,7 +1814,13 @@ mod tests {
                 let cw = 116;
                 let ch = 36;
                 // data_x at maximum bound (frac_x = 1.0)
-                draw_crosshair(frame, cx, cy, cw, ch, 100.0, 50.0, 0.0, 100.0, 0.0, 100.0);
+                draw_crosshair(
+                    frame,
+                    Rect::new(cx, cy, cw, ch),
+                    100.0,
+                    50.0,
+                    ChartBounds { x_lo: 0.0, x_hi: 100.0, y_lo: 0.0, y_hi: 100.0 },
+                );
             })
             .unwrap();
         // If we get here without panicking, the test passes
@@ -1809,7 +1833,13 @@ mod tests {
 
         terminal
             .draw(|frame| {
-                draw_crosshair(frame, 10, 5, 60, 15, 0.0, 0.0, 0.0, 100.0, 0.0, 100.0);
+                draw_crosshair(
+                    frame,
+                    Rect::new(10, 5, 60, 15),
+                    0.0,
+                    0.0,
+                    ChartBounds { x_lo: 0.0, x_hi: 100.0, y_lo: 0.0, y_hi: 100.0 },
+                );
             })
             .unwrap();
     }
@@ -1827,12 +1857,76 @@ mod tests {
                 let cw = 60;
                 let ch = 19;
                 // Test all four corners
-                draw_crosshair(frame, cx, cy, cw, ch, 0.0, 0.0, 0.0, 100.0, 0.0, 100.0);
-                draw_crosshair(frame, cx, cy, cw, ch, 100.0, 0.0, 0.0, 100.0, 0.0, 100.0);
-                draw_crosshair(frame, cx, cy, cw, ch, 0.0, 100.0, 0.0, 100.0, 0.0, 100.0);
-                draw_crosshair(frame, cx, cy, cw, ch, 100.0, 100.0, 0.0, 100.0, 0.0, 100.0);
+                draw_crosshair(
+                    frame,
+                    Rect::new(cx, cy, cw, ch),
+                    0.0,
+                    0.0,
+                    ChartBounds { x_lo: 0.0, x_hi: 100.0, y_lo: 0.0, y_hi: 100.0 },
+                );
+                draw_crosshair(
+                    frame,
+                    Rect::new(cx, cy, cw, ch),
+                    100.0,
+                    0.0,
+                    ChartBounds { x_lo: 0.0, x_hi: 100.0, y_lo: 0.0, y_hi: 100.0 },
+                );
+                draw_crosshair(
+                    frame,
+                    Rect::new(cx, cy, cw, ch),
+                    0.0,
+                    100.0,
+                    ChartBounds { x_lo: 0.0, x_hi: 100.0, y_lo: 0.0, y_hi: 100.0 },
+                );
+                draw_crosshair(
+                    frame,
+                    Rect::new(cx, cy, cw, ch),
+                    100.0,
+                    100.0,
+                    ChartBounds { x_lo: 0.0, x_hi: 100.0, y_lo: 0.0, y_hi: 100.0 },
+                );
             })
             .unwrap();
+    }
+
+    #[test]
+    fn crosshair_skipped_for_non_finite_coordinates() {
+        // NaN fails every comparison, so `frac < 0.0 || frac > 1.0` does not catch it.
+        // Execution then reaches `(NaN * ..) as u16`, which saturates to 0 and pins a
+        // bogus crosshair to the chart's top-left corner as if that were the data point.
+        for (dx, dy) in [
+            (f64::NAN, 50.0),
+            (50.0, f64::NAN),
+            (f64::NAN, f64::NAN),
+        ] {
+            let backend = TestBackend::new(80, 24);
+            let mut terminal = Terminal::new(backend).unwrap();
+            terminal
+                .draw(|frame| {
+                    draw_crosshair(
+                        frame,
+                        Rect::new(10, 5, 60, 15),
+                        dx,
+                        dy,
+                        ChartBounds { x_lo: 0.0, x_hi: 100.0, y_lo: 0.0, y_hi: 100.0 },
+                    );
+                })
+                .unwrap();
+
+            let buffer = terminal.backend().buffer().clone();
+            let drawn: String = buffer
+                .content()
+                .iter()
+                .map(|c| c.symbol().chars().next().unwrap_or(' '))
+                .collect();
+
+            assert!(
+                !drawn.contains('\u{2502}') && !drawn.contains('\u{2500}'),
+                "non-finite coordinates ({}, {}) must not draw a crosshair",
+                dx,
+                dy
+            );
+        }
     }
 
     #[test]
@@ -1843,10 +1937,28 @@ mod tests {
         terminal
             .draw(|frame| {
                 // Minimum viable chart area
-                draw_crosshair(frame, 0, 0, 2, 2, 50.0, 50.0, 0.0, 100.0, 0.0, 100.0);
+                draw_crosshair(
+                    frame,
+                    Rect::new(0, 0, 2, 2),
+                    50.0,
+                    50.0,
+                    ChartBounds { x_lo: 0.0, x_hi: 100.0, y_lo: 0.0, y_hi: 100.0 },
+                );
                 // Degenerate areas should be no-ops
-                draw_crosshair(frame, 0, 0, 0, 0, 50.0, 50.0, 0.0, 100.0, 0.0, 100.0);
-                draw_crosshair(frame, 0, 0, 1, 1, 50.0, 50.0, 0.0, 100.0, 0.0, 100.0);
+                draw_crosshair(
+                    frame,
+                    Rect::new(0, 0, 0, 0),
+                    50.0,
+                    50.0,
+                    ChartBounds { x_lo: 0.0, x_hi: 100.0, y_lo: 0.0, y_hi: 100.0 },
+                );
+                draw_crosshair(
+                    frame,
+                    Rect::new(0, 0, 1, 1),
+                    50.0,
+                    50.0,
+                    ChartBounds { x_lo: 0.0, x_hi: 100.0, y_lo: 0.0, y_hi: 100.0 },
+                );
             })
             .unwrap();
     }

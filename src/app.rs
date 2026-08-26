@@ -182,6 +182,11 @@ pub enum InputMode {
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum PlotFocus {
     Signal,
+    // clippy suggests `Fft`. FFT is the universal spelling for this transform in
+    // signal-processing code, and it is spelled that way everywhere else here -
+    // fft_enabled, fft_dirty, the [f] binding, the FFT chart title. Renaming the
+    // variant alone would make it the odd one out and read worse at every call site.
+    #[allow(clippy::upper_case_acronyms)]
     FFT,
 }
 
@@ -845,36 +850,6 @@ impl App {
         }
     }
 
-    /// Reload the current value without resetting scroll.
-    #[allow(dead_code)]
-    pub fn refresh_selected_value(&mut self, client: &mut MultiRedisClient) {
-        if let Some(idx) = self.key_list_state.selected() {
-            if idx < self.keys.len() {
-                let key = self.keys[idx].clone();
-
-                if let Ok(info) = client.get_key_info(&key) {
-                    self.current_key_info = Some(info);
-                }
-
-                match client.get_value(&key) {
-                    Ok(mut value) => {
-                        cap_stream_entries(&mut value);
-                        if let RedisValue::Stream(ref entries) = value {
-                            self.last_stream_id =
-                                entries.last().map(|e| e.id.clone());
-                        }
-                        self.update_plot_data(&value);
-                        if self.fft_enabled {
-                            self.compute_fft();
-                        }
-                        self.current_value = Some(value);
-                    }
-                    Err(_) => {}
-                }
-            }
-        }
-    }
-
     pub fn is_viewing_stream(&self) -> bool {
         matches!(
             &self.current_key_info,
@@ -1175,8 +1150,8 @@ impl App {
                     (-0.05, 1.05)
                 } else if !self.plot_slots.is_empty() {
                     let slot = &self.plot_slots[0];
-                    if slot.y_min.is_some() && slot.y_max.is_some() {
-                        (slot.y_min.unwrap(), slot.y_max.unwrap())
+                    if let (Some(y_min), Some(y_max)) = (slot.y_min, slot.y_max) {
+                        (y_min, y_max)
                     } else {
                         self.auto_signal_bounds()
                     }
