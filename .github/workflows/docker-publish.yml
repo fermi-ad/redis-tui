@@ -12,14 +12,14 @@ env:
 
 jobs:
   build-and-push:
-    # Must be the self-hosted runner. adregistry.fnal.gov grants push only from
-    # inside the FNAL network: from GitHub's cloud runners the same robot
-    # credential authenticates fine but is granted `pull` only, so every push
-    # from ubuntu-latest failed with "unauthorized ... action: push".
+    # A cloud runner is enough. An earlier revision of this workflow moved the
+    # job to the self-hosted `adlinux3` on the theory that Harbor only grants
+    # push from inside the FNAL network - that was wrong. Publishing was failing
+    # because the credentials were interpolated into the shell (see the login
+    # step below), and both runners publish fine once that is fixed.
     #
-    # This matches redis-pvxs-ioc, whose registry jobs all run on adlinux3 and
-    # succeed; its ci-image.yml uses a cloud runner for pull requests and
-    # adlinux3 for anything that touches the registry.
+    # `redis-pvxs-ioc` runs its registry jobs on `adlinux3`; switching for
+    # consistency with it would be reasonable, but is not required here.
     runs-on: ubuntu-latest
 
     steps:
