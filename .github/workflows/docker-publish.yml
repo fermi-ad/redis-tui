@@ -12,11 +12,15 @@ env:
 
 jobs:
   build-and-push:
+    # A cloud runner is enough. An earlier revision of this workflow moved the
+    # job to the self-hosted `adlinux3` on the theory that Harbor only grants
+    # push from inside the FNAL network - that was wrong. Publishing was failing
+    # because the credentials were interpolated into the shell (see the login
+    # step below), and both runners publish fine once that is fixed.
+    #
+    # `redis-pvxs-ioc` runs its registry jobs on `adlinux3`; switching for
+    # consistency with it would be reasonable, but is not required here.
     runs-on: ubuntu-latest
-    env:
-      # Mirrored into env so step-level `if:` can test it - secrets are not
-      # available directly in an `if:` expression.
-      REGISTRY_USERNAME: ${{ secrets.ADREGISTRY_INST_USERNAME }}
 
     steps:
       - name: Checkout
@@ -28,38 +32,59 @@ jobs:
           VERSION=$(grep -m1 '^version' Cargo.toml | sed 's/version = "\(.*\)"/\1/')
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
 
-      - name: Log in to Harbor
-        if: env.REGISTRY_USERNAME != ''
-        uses: docker/login-action@v3
-        with:
-          registry: ${{ env.REGISTRY }}
-          username: ${{ secrets.ADREGISTRY_INST_USERNAME }}
-          password: ${{ secrets.ADREGISTRY_INST_SECRET }}
-
       - name: Set image tags
         id: tags
         run: |
-          VERSION=${{ steps.version.outputs.version }}
-          if [ -n "$ACT" ] || { [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ "${{ github.ref_name }}" != "main" ]; }; then
+          VERSION="${{ steps.version.outputs.version }}"
+          if [ "${{ github.ref_name }}" != "main" ]; then
+            # Branch-suffixed tags keep dispatch runs off :latest.
             BRANCH=$(echo "${{ github.ref_name }}" | sed 's|/|-|g')
-            echo "tags=${{ env.IMAGE }}:latest-${BRANCH},${{ env.IMAGE }}:${VERSION}-${BRANCH}" >> "$GITHUB_OUTPUT"
+            echo "primary=${IMAGE}:${VERSION}-${BRANCH}" >> "$GITHUB_OUTPUT"
+            echo "moving=${IMAGE}:latest-${BRANCH}" >> "$GITHUB_OUTPUT"
           else
-            echo "tags=${{ env.IMAGE }}:latest,${{ env.IMAGE }}:${VERSION}" >> "$GITHUB_OUTPUT"
+            echo "primary=${IMAGE}:${VERSION}" >> "$GITHUB_OUTPUT"
+            echo "moving=${IMAGE}:latest" >> "$GITHUB_OUTPUT"
           fi
 
-      # `push` is gated on the same condition as the login above. Previously the
-      # login skipped itself when the credential was absent but this pushed
-      # unconditionally, so a missing secret surfaced as an `unauthorized` error
-      # after a full image build rather than as a clear skip.
-      - name: Build and push
-        uses: docker/build-push-action@v6
-        with:
-          context: .
-          push: ${{ env.REGISTRY_USERNAME != '' }}
-          platforms: linux/amd64
-          tags: ${{ steps.tags.outputs.tags }}
-
-      - name: Warn if the push was skipped
-        if: env.REGISTRY_USERNAME == ''
+      # Plain docker login/build/push rather than buildx and
+      # docker/build-push-action - the same commands redis-pvxs-ioc uses, and
+      # they do not assume buildx is set up on the self-hosted runner.
+      # Secrets are passed through env: rather than ${{ }} interpolation. GitHub
+      # substitutes an expression as literal text into the script, so a Harbor
+      # robot name - which contains a '$' - gets word-expanded by bash before
+      # docker ever sees it: "robot$instrumentation+redis-tui" becomes
+      # "robot+redis-tui", and Harbor rejects it. An env var is passed as data
+      # and is never re-parsed by the shell.
+      - name: Registry login
+        env:
+          USERNAME: ${{ secrets.ADREGISTRY_INST_USERNAME }}
+          SECRET: ${{ secrets.ADREGISTRY_INST_SECRET }}
         run: |
-          echo "::warning::ADREGISTRY_INST_USERNAME is not set - image was built but not pushed."
+          printf '%s' "$SECRET" \
+            | docker login "$REGISTRY" \
+                --username "$USERNAME" \
+                --password-stdin
+
+      - name: Build and push
+        run: |
+          PRIMARY="${{ steps.tags.outputs.primary }}"
+          MOVING="${{ steps.tags.outputs.moving }}"
+
+          docker build --platform linux/amd64 -t "$PRIMARY" -t "$MOVING" .
+          docker push "$PRIMARY"
+          docker push "$MOVING"
+
+          DIGEST_REF="$(docker image inspect "$PRIMARY" \
+            --format '{{range .RepoDigests}}{{println .}}{{end}}' \
+            | grep -F "${IMAGE}@sha256:" | head -n 1)"
+          {
+            echo "### Published"
+            echo
+            echo "- \`$PRIMARY\`"
+            echo "- \`$MOVING\`"
+            echo "- Digest: \`${DIGEST_REF:-unknown}\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Docker logout
+        if: always()
+        run: docker logout "$REGISTRY"
