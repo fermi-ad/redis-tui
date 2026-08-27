@@ -100,4 +100,37 @@ jobs:
             echo "| Format | ${{ steps.fmt.outcome }} | yes |"
             echo
             echo "All checks are enforced: build, tests, clippy and format."
+            echo "The Docker image is built by the separate \`docker-build\` job."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  # Builds the image without pushing, so a broken Dockerfile fails the pull
+  # request. Previously nothing built it before merge - `docker-publish.yml`
+  # only fires on push to main - so the publish job was the first thing that
+  # would notice, by which point the break was already on main.
+  #
+  # Separate job rather than a step in build-and-test: it runs in parallel and
+  # shows up as its own check. No registry credentials are involved; this never
+  # pushes.
+  docker-build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # No `--target`, so this builds the final `publish` stage - the same thing
+      # docker-publish.yml builds and ships.
+      - name: Build image
+        run: docker build --platform linux/amd64 -t redis-tui:ci .
+
+      - name: Image summary
+        run: |
+          {
+            echo "### Docker image"
+            echo
+            echo "Built, not pushed."
+            echo
+            echo '```'
+            docker image ls redis-tui:ci --format '{{.Repository}}:{{.Tag}}  {{.Size}}'
+            echo '```'
           } >> "$GITHUB_STEP_SUMMARY"

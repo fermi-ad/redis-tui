@@ -1,18 +1,22 @@
 name: Require Cargo version bump
 
+# Every merge to main publishes an image tagged with the Cargo.toml version, so
+# the version has to move on every merge - otherwise the merge republishes an
+# existing tag with a new digest and that tag stops identifying one artifact.
+#
+# Deliberately unfiltered by path. The previous version only fired on '**/*.rs'
+# and Cargo.toml, which let a docs-only PR through: #78 would have republished
+# :1.3.3 over the image from #77.
+#
+# Deliberately not run on push either. The old push branch diffed origin/main
+# against itself, so it always passed vacuously, and by then the merge has
+# already happened - the gate is only meaningful before it.
 on:
   pull_request:
-    paths:
-      - '**/*.rs'
-      - 'Cargo.toml'
-  push:
-    paths:
-      - '**/*.rs'
-      - 'Cargo.toml'
   workflow_dispatch:
     inputs:
       base_ref:
-        description: 'Base branch to compare against'
+        description: 'Branch to compare against'
         default: 'main'
 
 jobs:
@@ -20,53 +24,51 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
+      - name: Checkout
+        uses: actions/checkout@v4
 
-      - name: Resolve base SHA
-        id: base
+      - name: Require a strict version increase
+        env:
+          BASE_REF: ${{ github.base_ref || inputs.base_ref || 'main' }}
         run: |
-          if [ "${{ github.event_name }}" = "pull_request" ]; then
-            echo "sha=${{ github.event.pull_request.base.sha }}" >> $GITHUB_OUTPUT
-          elif [ "${{ github.event_name }}" = "push" ]; then
-            echo "sha=$(git rev-parse origin/main)" >> $GITHUB_OUTPUT
-          else
-            echo "sha=$(git rev-parse origin/${{ inputs.base_ref || 'main' }})" >> $GITHUB_OUTPUT
+          set -uo pipefail
+
+          # Read the version from [package] only, so a [dependencies.foo] block
+          # carrying its own `version =` cannot be picked up by mistake.
+          extract() {
+            awk '/^\[package\]/ { in_pkg = 1; next }
+                 /^\[/          { in_pkg = 0 }
+                 in_pkg && /^version[[:space:]]*=/ {
+                   gsub(/^version[[:space:]]*=[[:space:]]*"|".*$/, "")
+                   print; exit
+                 }'
+          }
+
+          # Compare against the tip of the base branch rather than the PR's
+          # recorded base SHA: the version must beat what is on main *now*, so a
+          # stale branch correctly starts failing once main moves ahead.
+          git fetch --no-tags --depth=1 origin "$BASE_REF"
+
+          OLD="$(git show FETCH_HEAD:Cargo.toml | extract)"
+          NEW="$(extract < Cargo.toml)"
+
+          SEMVER_RE='^[0-9]+\.[0-9]+\.[0-9]+$'
+          fail() { echo "::error::$1"; exit 1; }
+
+          [ -n "$OLD" ] || fail "Could not read the version from Cargo.toml on $BASE_REF."
+          [ -n "$NEW" ] || fail "Could not read the version from Cargo.toml on this branch."
+
+          [[ "$OLD" =~ $SEMVER_RE ]] || fail "Version on $BASE_REF is '$OLD', which is not X.Y.Z."
+          [[ "$NEW" =~ $SEMVER_RE ]] || fail "Version '$NEW' is not X.Y.Z. Pre-release suffixes are not supported."
+
+          if [ "$OLD" = "$NEW" ]; then
+            fail "Version is still $NEW. Every merge to $BASE_REF publishes an image tagged with it, so it must be bumped."
           fi
 
-      - name: Detect changes
-        id: diff
-        run: |
-          CHANGED_FILES=$(git diff --name-only ${{ steps.base.outputs.sha }})
-
-          echo "CHANGED_FILES<<EOF" >> $GITHUB_OUTPUT
-          echo "$CHANGED_FILES" >> $GITHUB_OUTPUT
-          echo "EOF" >> $GITHUB_OUTPUT
-
-      - name: Enforce version bump
-        run: |
-          CHANGED="${{ steps.diff.outputs.CHANGED_FILES }}"
-
-          # Sanity check: only enforce if Rust files actually changed
-          if ! echo "$CHANGED" | grep -q "\.rs"; then
-            echo "No Rust changes detected"
-            exit 0
+          # sort -V puts the lower version first. If that is not OLD, NEW went backwards.
+          if [ "$(printf '%s\n%s\n' "$OLD" "$NEW" | sort -V | head -n1)" != "$OLD" ]; then
+            fail "Version went backwards: $OLD -> $NEW."
           fi
 
-          # Require Cargo.toml to be modified
-          if ! echo "$CHANGED" | grep -q "Cargo.toml"; then
-            echo "Rust files changed but Cargo.toml not updated"
-            exit 1
-          fi
-
-          # Compare version values
-          OLD_VERSION=$(git show ${{ steps.base.outputs.sha }}:Cargo.toml | grep '^version' | head -1)
-          NEW_VERSION=$(grep '^version' Cargo.toml | head -1)
-
-          if [ "$OLD_VERSION" = "$NEW_VERSION" ]; then
-            echo "Cargo.toml version not bumped"
-            exit 1
-          fi
-
-          echo "Version bump detected"
+          echo "Version bump: $OLD -> $NEW"
+          echo "### Version bump: \`$OLD\` → \`$NEW\`" >> "$GITHUB_STEP_SUMMARY"
