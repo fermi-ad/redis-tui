@@ -295,7 +295,7 @@ When a listener is active:
 - The status bar shows the entry count per update
 - A green `L` indicator appears next to the key in the list
 - Up to 4 listeners can run simultaneously (FIFO eviction if exceeded)
-- Stream entries in memory are capped at 10,000 per key to prevent OOM
+- Stream entries in memory are capped at 10 per key (`MAX_STREAM_ENTRIES`), newest kept - the last 5 are displayed and the newest is plotted. Rate statistics come from a separate 60-second ring of entry timestamps, so they survive the entries being discarded
 
 Press `l` again on the same key to stop its listener.
 

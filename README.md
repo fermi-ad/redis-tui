@@ -1,5 +1,8 @@
 # redis-tui
 
+[![CI](https://github.com/fermi-ad/redis-tui/actions/workflows/ci.yml/badge.svg)](https://github.com/fermi-ad/redis-tui/actions/workflows/ci.yml)
+[![Build and Push Docker Image](https://github.com/fermi-ad/redis-tui/actions/workflows/docker-publish.yml/badge.svg)](https://github.com/fermi-ad/redis-tui/actions/workflows/docker-publish.yml)
+
 A terminal UI client for Redis inspired by Redis Insight, built with Rust and [ratatui](https://github.com/ratatui/ratatui).
 
 ## Features
@@ -31,6 +34,16 @@ cargo build --release
 The binary will be at `target/release/redis-tui`.
 
 ### Docker
+
+Every push to `main` publishes an image to Fermilab's Harbor registry, tagged with
+both `latest` and the `Cargo.toml` version:
+
+```bash
+docker pull adregistry.fnal.gov/instrumentation/redis-tui:latest
+docker run -it --rm --network host adregistry.fnal.gov/instrumentation/redis-tui
+```
+
+To build it yourself instead:
 
 ```bash
 docker build -t redis-tui .
@@ -67,7 +80,12 @@ redis-tui --url redis://:password@host:6379/2
 
 # Connect to multiple hosts
 redis-tui --hosts-file hosts.txt
+
+# Widen the ingestion rate chart to an hour, averaged over 5s
+redis-tui --rate-history 60 --rate-avg-window 5
 ```
+
+See [MANUAL.md](MANUAL.md#command-line-options) for the full flag reference.
 
 ## Keybindings at a Glance
 
@@ -86,7 +104,14 @@ redis-tui --hosts-file hosts.txt
 | `f` | Toggle FFT |
 | `s` | Edit value |
 | `n` | New key |
+| `R` | Rename key |
+| `z` | Set TTL |
 | `d` | Delete key |
+| `t` / `T` | Cycle data type forward / back |
+| `e` | Toggle endianness |
+| `g` | Toggle FFT log scale |
+| `a` | Reset plot to auto limits |
+| `x` | Plot settings |
 | `?` | Help |
 | `q` / `Esc` | Quit |
 
@@ -100,4 +125,8 @@ The TUI is built with three main panels:
 - **Value View** (right) — display key metadata and formatted values
 - **Data Plot** (bottom) — visualize binary data as waveforms with optional FFT
 
-Background threads handle stream listening (XREAD) and signal generation (XADD + XTRIM) independently per key, with bounded memory usage (max 10,000 stream entries per key in memory).
+Background threads handle stream listening (XREAD) and signal generation (XADD + XTRIM) independently per key. Memory is bounded: only the 10 newest entries of a stream are held per key (`MAX_STREAM_ENTRIES`), of which the last 5 are displayed and the newest is plotted. Ingestion rate statistics are computed from a separate 60-second ring of entry timestamps, so the rate view stays accurate even though the entries themselves are discarded.
+
+## License
+
+BSD 3-Clause. See [LICENSE](LICENSE).
