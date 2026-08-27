@@ -49,11 +49,46 @@ jobs:
       # Plain docker login/build/push rather than buildx and
       # docker/build-push-action - the same commands redis-pvxs-ioc uses, and
       # they do not assume buildx is set up on the self-hosted runner.
-      - name: Registry login
+      # TEMPORARY diagnostic. Prints only lengths, never the values, and only to
+      # confirm or rule out the mangling described on the login step below.
+      # Remove once the login is proven green.
+      - name: Credential shape check
+        env:
+          USERNAME: ${{ secrets.ADREGISTRY_INST_USERNAME }}
+          SECRET: ${{ secrets.ADREGISTRY_INST_SECRET }}
         run: |
-          printf '%s' "${{ secrets.ADREGISTRY_INST_SECRET }}" \
+          # Same text, reaching bash two different ways.
+          interpolated="${{ secrets.ADREGISTRY_INST_USERNAME }}"
+
+          echo "username via env:          ${#USERNAME} chars"
+          echo "username via interpolation: ${#interpolated} chars"
+          echo "secret via env:            ${#SECRET} chars"
+
+          case "$USERNAME" in
+            *'$'*) echo "username CONTAINS a dollar sign" ;;
+            *)     echo "username has no dollar sign" ;;
+          esac
+
+          if [ "${#USERNAME}" -ne "${#interpolated}" ]; then
+            echo "::error::The username is mangled when interpolated into a run: block."
+          else
+            echo "Interpolation is not altering the username."
+          fi
+
+      # Secrets are passed through env: rather than ${{ }} interpolation. GitHub
+      # substitutes an expression as literal text into the script, so a Harbor
+      # robot name - which contains a '$' - gets word-expanded by bash before
+      # docker ever sees it: "robot$instrumentation+redis-tui" becomes
+      # "robot+redis-tui", and Harbor rejects it. An env var is passed as data
+      # and is never re-parsed by the shell.
+      - name: Registry login
+        env:
+          USERNAME: ${{ secrets.ADREGISTRY_INST_USERNAME }}
+          SECRET: ${{ secrets.ADREGISTRY_INST_SECRET }}
+        run: |
+          printf '%s' "$SECRET" \
             | docker login "$REGISTRY" \
-                --username "${{ secrets.ADREGISTRY_INST_USERNAME }}" \
+                --username "$USERNAME" \
                 --password-stdin
 
       - name: Build and push
