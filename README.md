@@ -83,6 +83,9 @@ redis-tui --hosts-file hosts.txt
 
 # Widen the ingestion rate chart to an hour, averaged over 5s
 redis-tui --rate-history 60 --rate-avg-window 5
+
+# Wait longer for multi-host entries that are still booting
+redis-tui --hosts-file hosts.txt --connect-retries 10 --connect-timeout 5
 ```
 
 See [MANUAL.md](MANUAL.md#command-line-options) for the full flag reference.

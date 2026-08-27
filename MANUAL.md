@@ -34,6 +34,8 @@ redis-tui [OPTIONS]
 | `--hosts-file <PATH>` | Path to hosts file for multi-host mode | None |
 | `--rate-history <MINUTES>` | Rolling window for the ingestion rate chart | `20` |
 | `--rate-avg-window <SECONDS>` | Sliding average window for the plotted rate line | `2` |
+| `--connect-retries <N>` | Retry attempts for a multi-host entry that is not up yet | `5` |
+| `--connect-timeout <SECONDS>` | Socket timeout per connection attempt in multi-host mode | `3` |
 
 ### Examples
 
@@ -76,6 +78,27 @@ redis://:password@10.0.0.5:6379/0
 ```
 
 Run with: `redis-tui --hosts-file hosts.txt`
+
+Every entry is validated before any connection is attempted, using the same URL
+parser the client itself uses. If any line is unparseable the run stops and lists
+all of them at once, with physical line numbers, so one run tells you everything
+to fix:
+
+```
+Error: Hosts file 'hosts.txt' has 2 invalid entries:
+  line 3: localhost:6379
+    Redis URL did not parse - InvalidClientConfig - did you mean redis://localhost:6379 ?
+  line 7: !!! junk
+    Redis URL did not parse - InvalidClientConfig
+```
+
+**TLS is not supported.** This build declares `redis = "1.0"` with no TLS
+feature, so a `rediss://` entry is rejected at parse time rather than failing
+later at connect.
+
+A host that parses but is not up yet is retried `--connect-retries` times, each
+attempt bounded by `--connect-timeout`. Hosts that never come up are reported and
+the session continues without them; if none come up at all, the run fails.
 
 In multi-host mode, keys from all hosts are aggregated into a single list. If the same key exists on multiple hosts, a collision warning is displayed when selecting it. The status bar shows which host each key belongs to.
 

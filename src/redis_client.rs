@@ -43,6 +43,10 @@ pub struct RedisClient {
 /// Returns 0 when the URL carries no usable database component. Query strings and
 /// fragments are stripped first, so `redis://host/3?timeout=5` yields 3 rather than
 /// silently falling back to 0, and a trailing slash (`redis://host/3/`) is tolerated.
+/// Socket timeout used by `RedisClient::connect`. Multi-host startup overrides
+/// this via `connect_with_timeout` so its retry budget stays bounded.
+const DEFAULT_CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
 fn parse_db_from_url(url: &str) -> i64 {
     // Strip `?query` and `#fragment` before looking at the path.
     let trimmed = url.split(['?', '#']).next().unwrap_or(url);
@@ -89,10 +93,17 @@ fn validate_ttl(ttl: i64, key: &str) -> Result<()> {
 
 impl RedisClient {
     pub fn connect(url: &str) -> Result<Self> {
+        Self::connect_with_timeout(url, DEFAULT_CONNECT_TIMEOUT)
+    }
+
+    /// Connect with an explicit socket timeout. `from_urls` uses this so the
+    /// startup retry budget is actually bounded: with the fixed 10s timeout, a
+    /// host that black-holes packets cost 10s per attempt on top of the sleep.
+    pub fn connect_with_timeout(url: &str, timeout: std::time::Duration) -> Result<Self> {
         let client = redis::Client::open(url)
             .with_context(|| format!("Failed to create Redis client for {}", url))?;
         let connection = client
-            .get_connection_with_timeout(std::time::Duration::from_secs(10))
+            .get_connection_with_timeout(timeout)
             .with_context(|| format!("Failed to connect to {}", url))?;
 
         // Parse db number from URL (e.g., redis://host:port/3)
@@ -551,17 +562,25 @@ impl MultiRedisClient {
         })
     }
 
-    /// Create from multiple URLs with retry logic for hosts that aren't ready yet.
-    pub fn from_urls(urls: &[(String, String)]) -> Result<Self> {
+    /// Create from multiple URLs, retrying hosts that aren't up yet.
+    ///
+    /// `max_retries` and `connect_timeout` are caller-supplied so startup cannot
+    /// stall indefinitely. Entries here are already known to be well-formed -
+    /// `parse_hosts_file` rejects unparseable URLs before this is reached - so
+    /// every retry is against a host that could plausibly come up.
+    pub fn from_urls(
+        urls: &[(String, String)],
+        max_retries: u32,
+        connect_timeout: std::time::Duration,
+    ) -> Result<Self> {
         let mut clients = Vec::new();
         let mut labels = Vec::new();
-        let max_retries = 15;
         let retry_delay = std::time::Duration::from_secs(2);
 
         // First pass: try to connect to all hosts, track failures
         let mut pending: Vec<(usize, String, String)> = Vec::new();
         for (i, (label, url)) in urls.iter().enumerate() {
-            match RedisClient::connect(url) {
+            match RedisClient::connect_with_timeout(url, connect_timeout) {
                 Ok(client) => {
                     clients.push(Some(client));
                     labels.push(label.clone());
@@ -575,7 +594,7 @@ impl MultiRedisClient {
         }
 
         // Retry failed connections
-        let mut attempt = 0;
+        let mut attempt: u32 = 0;
         while !pending.is_empty() && attempt < max_retries {
             attempt += 1;
             eprintln!(
@@ -587,7 +606,7 @@ impl MultiRedisClient {
             std::thread::sleep(retry_delay);
 
             pending.retain(|(i, label, url)| {
-                match RedisClient::connect(url) {
+                match RedisClient::connect_with_timeout(url, connect_timeout) {
                     Ok(client) => {
                         eprintln!("  Connected to {}", label);
                         clients[*i] = Some(client);
@@ -613,9 +632,12 @@ impl MultiRedisClient {
 
         if !failed.is_empty() {
             eprintln!(
-                "Warning: could not connect to {} host(s): {}",
+                "Warning: {} host(s) never came up and are absent from this session: {}",
                 failed.len(),
                 failed.join(", ")
+            );
+            eprintln!(
+                "         Their keys will not appear. Raise --connect-retries or --connect-timeout if they were merely slow to start."
             );
         }
 
@@ -1177,5 +1199,32 @@ mod tests {
     #[test]
     fn db_parses_with_empty_path() {
         assert_eq!(parse_db_from_url("redis://127.0.0.1:6379/"), 0);
+    }
+
+    /// A host that is well-formed but not listening must not hold startup for the
+    /// old 15 x (10s connect + 2s sleep) budget. Uses a port the OS just handed
+    /// back and released, so the connection is refused immediately and what this
+    /// measures is the retry budget rather than network latency.
+    #[test]
+    fn from_urls_gives_up_on_an_unreachable_host_quickly() {
+        let port = match free_port() {
+            Some(p) => p,
+            None => return,
+        };
+        let urls = vec![("dead".to_string(), format!("redis://127.0.0.1:{}", port))];
+
+        let start = std::time::Instant::now();
+        let result = MultiRedisClient::from_urls(&urls, 2, std::time::Duration::from_secs(1));
+        let elapsed = start.elapsed();
+
+        assert!(
+            result.is_err(),
+            "no host connected, so this must be an error"
+        );
+        assert!(
+            elapsed < std::time::Duration::from_secs(10),
+            "gave up after {:?}; the retry budget is not being honoured",
+            elapsed
+        );
     }
 }
