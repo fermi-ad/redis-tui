@@ -159,17 +159,24 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ~/.cargo/bin/cargo-audit
-          key: ${{ runner.os }}-cargo-audit-0.21
+          key: ${{ runner.os }}-cargo-audit-0.22
 
       - name: Install cargo-audit
         if: steps.cache-audit.outputs.cache-hit != 'true'
-        run: cargo install cargo-audit --locked --version ^0.21
+        run: cargo install cargo-audit --locked --version ^0.22
 
-      # Vulnerabilities fail by default. `unsound` is promoted to an error too,
-      # since that class is what RUSTSEC-2026-0190 (anyhow) was filed under and
-      # it is exactly the kind of thing worth catching. `unmaintained` is left
-      # as a warning deliberately: it fires on transitive crates that cannot be
-      # fixed from here, and hard-failing on it would train people to ignore CI.
+      # Vulnerabilities fail by default, but that default alone would not have
+      # caught either advisory this job was added for: RUSTSEC-2026-0190 (anyhow)
+      # and RUSTSEC-2026-0253 (lru) are both classified `unsound`, and plain
+      # `cargo audit` exits 0 on them. Verified against the pre-update lockfile -
+      # without `--deny unsound` the gate is a no-op here. `yanked` is promoted
+      # for the same reason. `unmaintained` is left as a warning deliberately: it
+      # fires on transitive crates that cannot be fixed from here, and
+      # hard-failing on it would train people to ignore CI.
+      #
+      # Do not pin cargo-audit below 0.22: 0.21 cannot parse the CVSS 4.0 vectors
+      # now present in the RustSec database and fails to load it at all, which
+      # looks like a scan failure rather than a tooling one.
       - name: Audit
         run: cargo audit --deny unsound --deny yanked
 
