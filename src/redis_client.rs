@@ -1030,6 +1030,100 @@ mod tests {
     }
 
     /// End-to-end: the skipped count must reach the status line the user actually reads.
+    /// Regression test for the delete confirmation acting on the live selection.
+    ///
+    /// The popup is half the frame wide and does not cover the key list, and mouse
+    /// input is not gated by `InputMode`, so a click can move the selection while
+    /// the prompt is up. The delete must still hit the key the prompt named.
+    #[test]
+    #[ignore = "requires redis-server; run with: cargo test -- --ignored"]
+    fn confirmed_delete_targets_the_key_the_prompt_named() {
+        let server = TestRedis::start();
+        let mut seed = RedisClient::connect(&server.url()).unwrap();
+        set_key(&mut seed, "alpha", "keep-me");
+        set_key(&mut seed, "beta", "keep-me-too");
+        drop(seed);
+
+        let mut multi = MultiRedisClient::from_single(&server.url()).unwrap();
+        let mut app = crate::app::App::new();
+        app.refresh_keys(&mut multi);
+        assert_eq!(app.keys, vec!["alpha".to_string(), "beta".to_string()]);
+
+        // `d` on alpha captures alpha as the target.
+        app.key_list_state.select(Some(0));
+        app.confirm_action = Some(crate::app::ConfirmAction::DeleteKey {
+            key: app.selected_key_name().unwrap().to_string(),
+        });
+        app.input_mode = crate::app::InputMode::Confirm;
+
+        // A click lands on beta while the popup is still open.
+        app.key_list_state.select(Some(1));
+        assert_eq!(app.selected_key_name(), Some("beta"));
+
+        crate::handle_confirm_input(&mut app, &mut multi, crossterm::event::KeyCode::Char('y'));
+
+        let mut check = RedisClient::connect(&server.url()).unwrap();
+        let alpha: bool = redis::cmd("EXISTS")
+            .arg("alpha")
+            .query(&mut check.connection)
+            .unwrap();
+        let beta: bool = redis::cmd("EXISTS")
+            .arg("beta")
+            .query(&mut check.connection)
+            .unwrap();
+        assert!(
+            !alpha,
+            "the key named in the prompt should have been deleted"
+        );
+        assert!(beta, "the key merely selected at the time must survive");
+        assert!(
+            app.status_message.contains("alpha"),
+            "status line should name the deleted key, got: {}",
+            app.status_message
+        );
+    }
+
+    /// Regression test for the value pane outliving the key it describes.
+    ///
+    /// `refresh_keys` preserves the selection index, not the selected key, so a
+    /// refresh that changes what that index points at must reload the value too.
+    /// Otherwise `start_edit` prefills the new key's editor with the old key's
+    /// value and saving writes it back under the new name.
+    #[test]
+    #[ignore = "requires redis-server; run with: cargo test -- --ignored"]
+    fn refresh_reloads_the_value_when_the_selected_key_changes() {
+        let server = TestRedis::start();
+        let mut seed = RedisClient::connect(&server.url()).unwrap();
+        set_key(&mut seed, "aaa", "value-of-aaa");
+
+        let mut multi = MultiRedisClient::from_single(&server.url()).unwrap();
+        let mut app = crate::app::App::new();
+        app.refresh_keys(&mut multi);
+        app.key_list_state.select(Some(0));
+        app.load_selected_value(&mut multi);
+        assert!(matches!(
+            app.current_value,
+            Some(RedisValue::String(ref b)) if b == b"value-of-aaa"
+        ));
+
+        // The key at index 0 is now a different key entirely.
+        redis::cmd("DEL")
+            .arg("aaa")
+            .exec(&mut seed.connection)
+            .unwrap();
+        set_key(&mut seed, "aab", "value-of-aab");
+        drop(seed);
+
+        app.refresh_keys(&mut multi);
+        assert_eq!(app.keys, vec!["aab".to_string()]);
+        assert_eq!(app.key_list_state.selected(), Some(0));
+        assert!(
+            matches!(app.current_value, Some(RedisValue::String(ref b)) if b == b"value-of-aab"),
+            "refresh must reload the value for the newly selected key, got: {:?}",
+            app.current_value
+        );
+    }
+
     #[test]
     #[ignore = "requires redis-server; run with: cargo test -- --ignored"]
     fn refresh_keys_status_line_reports_skipped_keys() {
