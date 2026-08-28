@@ -134,3 +134,52 @@ jobs:
             docker image ls redis-tui:ci --format '{{.Repository}}:{{.Tag}}  {{.Size}}'
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
+
+  # Advisory scan against the RustSec database.
+  #
+  # Dependabot is not a substitute. RUSTSEC-2026-0253 - a use-after-free in
+  # `lru`, reachable here through ratatui's render path - is not mirrored in
+  # GitHub's advisory database, so the repo reported zero open Dependabot
+  # alerts the whole time that advisory was live in Cargo.lock. The RustSec DB
+  # sees advisories GitHub's does not, and nothing in CI consulted it.
+  #
+  # Separate job so it reports as its own check and does not slow the build.
+  audit:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # cargo-audit is not preinstalled on the runner image and takes a couple
+      # of minutes to compile, so the built binary is cached on its own key.
+      # Bump the version in the key when bumping the version below.
+      - name: Cache cargo-audit
+        id: cache-audit
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/bin/cargo-audit
+          key: ${{ runner.os }}-cargo-audit-0.21
+
+      - name: Install cargo-audit
+        if: steps.cache-audit.outputs.cache-hit != 'true'
+        run: cargo install cargo-audit --locked --version ^0.21
+
+      # Vulnerabilities fail by default. `unsound` is promoted to an error too,
+      # since that class is what RUSTSEC-2026-0190 (anyhow) was filed under and
+      # it is exactly the kind of thing worth catching. `unmaintained` is left
+      # as a warning deliberately: it fires on transitive crates that cannot be
+      # fixed from here, and hard-failing on it would train people to ignore CI.
+      - name: Audit
+        run: cargo audit --deny unsound --deny yanked
+
+      - name: Audit summary
+        if: always()
+        run: |
+          {
+            echo "### Advisory audit"
+            echo
+            echo "Source: RustSec advisory database (\`cargo audit\`)."
+            echo "Vulnerabilities, unsound and yanked crates fail the build;"
+            echo "unmaintained crates are reported as warnings only."
+          } >> "$GITHUB_STEP_SUMMARY"
