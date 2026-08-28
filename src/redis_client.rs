@@ -1083,6 +1083,57 @@ mod tests {
         );
     }
 
+    /// Documents what a total scan failure currently looks like to `App`.
+    ///
+    /// `MultiRedisClient::scan_keys` never returns `Err` - it logs each per-host
+    /// failure with `eprintln!` and returns whatever succeeded - so losing every
+    /// host yields `Ok((vec![], 0))` and the status line reads "Loaded 0 keys".
+    /// An empty keyspace and an unreachable server are indistinguishable, and the
+    /// only account of the failure goes to stderr, over the alternate screen.
+    ///
+    /// That is #92, not something this change fixes. This test pins the current
+    /// behaviour so fixing #92 fails here and the assertion gets updated
+    /// deliberately rather than the change landing unnoticed.
+    ///
+    /// It also covers the half that IS in scope: a refresh that finds nothing
+    /// must not leave a stale value on screen.
+    #[test]
+    #[ignore = "requires redis-server; run with: cargo test -- --ignored"]
+    fn total_scan_failure_is_currently_indistinguishable_from_an_empty_keyspace() {
+        let server = TestRedis::start();
+        let url = server.url();
+        let mut seed = RedisClient::connect(&url).unwrap();
+        set_key(&mut seed, "aaa", "value-of-aaa");
+        drop(seed);
+
+        let mut multi = MultiRedisClient::from_single(&url).unwrap();
+        let mut app = crate::app::App::new();
+        app.refresh_keys(&mut multi);
+        app.key_list_state.select(Some(0));
+        app.load_selected_value(&mut multi);
+        assert!(matches!(
+            app.current_value,
+            Some(RedisValue::String(ref b)) if b == b"value-of-aaa"
+        ));
+
+        // The server disappears mid-session; dropping the harness kills it.
+        drop(server);
+
+        app.refresh_keys(&mut multi);
+        assert!(
+            app.status_message.contains("Loaded 0 keys"),
+            "known #92 behaviour: the host error is swallowed and reported as an \
+             empty keyspace. If this now names the failure, #92 is fixed - update \
+             this test. Got: {}",
+            app.status_message
+        );
+        assert_eq!(
+            app.key_list_state.selected(),
+            None,
+            "an empty listing must clear the selection"
+        );
+    }
+
     /// Regression test for the value pane outliving the key it describes.
     ///
     /// `refresh_keys` preserves the selection index, not the selected key, so a

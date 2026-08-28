@@ -1027,8 +1027,9 @@ fn handle_edit_input(
                     } else {
                         // Single-entry operation, close popup
                         app.cancel_edit();
-                        app.status_message = format!("{} on '{}' OK", op_label, key);
                         app.refresh_keys(client);
+                        // After refresh_keys, which sets its own status message.
+                        app.status_message = format!("{} on '{}' OK", op_label, key);
                     }
                 }
                 Err(e) => {

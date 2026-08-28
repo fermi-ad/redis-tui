@@ -750,7 +750,7 @@ impl App {
     }
 
     pub fn refresh_keys(&mut self, client: &mut MultiRedisClient) {
-        match client.scan_keys(&self.filter_pattern) {
+        let scan_ok = match client.scan_keys(&self.filter_pattern) {
             Ok((keys, skipped)) => {
                 // Get types for each key
                 let mut types = Vec::with_capacity(keys.len());
@@ -798,11 +798,13 @@ impl App {
                         self.key_list_state.select(Some(self.keys.len() - 1));
                     }
                 }
+                true
             }
             Err(e) => {
                 self.status_message = format!("Error scanning keys: {}", e);
+                false
             }
-        }
+        };
 
         self.db_size = client.get_db_size().unwrap_or(0);
         self.host_count = client.host_count();
@@ -822,7 +824,15 @@ impl App {
         // Doing it here rather than at each call site is deliberate: two of the
         // five refresh sites already called `load_selected_value` explicitly and
         // three did not, which is exactly how the mismatch survived.
-        self.load_selected_value(client);
+        //
+        // Only on a successful scan. If the scan failed, `self.keys` and the
+        // selection still describe the last good listing, so loading would issue
+        // further commands down a connection that just failed and replace the
+        // specific "Error scanning keys" message with a vaguer one from the
+        // value read - burying the actual cause.
+        if scan_ok {
+            self.load_selected_value(client);
+        }
     }
 
     pub fn load_selected_value(&mut self, client: &mut MultiRedisClient) {
