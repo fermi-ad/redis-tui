@@ -1,10 +1,31 @@
 name: Build and Push Docker Image
 
+# Publish only after CI has actually passed for the commit being published.
+#
+# This previously fired directly on `push: branches: [main]` with no `needs:`
+# and no `workflow_run:`, so it ran *in parallel* with the main-push CI run
+# rather than after it. A merge that broke the build still published `:latest`
+# and `:<version>` to Harbor, and the publish was frequently the thing that
+# finished first. Branch protection now keeps most breakage off main, but an
+# admin bypass or a merge that goes red only on main would still have shipped.
+#
+# The coupling is by workflow *name*: renaming the CI workflow silently stops
+# publishing. Keep the name here in step with `name:` in ci.yml.
 on:
-  push:
-    branches:
-      - main
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+    branches: [main]
   workflow_dispatch:
+
+# One publish at a time, and queued rather than cancelled. Two merges landing
+# close together used to race their `:latest` pushes with no ordering at all, so
+# `:latest` could end up on the older image. Queueing means the later commit
+# pushes last and wins; cancelling in progress could instead abandon a push
+# part-way through.
+concurrency:
+  group: docker-publish
+  cancel-in-progress: false
 
 env:
   REGISTRY: adregistry.fnal.gov
@@ -12,6 +33,17 @@ env:
 
 jobs:
   build-and-push:
+    # `workflow_run` fires on *completion*, whatever the outcome, so the
+    # conclusion has to be tested explicitly - without this the gate would be
+    # decorative. Restricted to CI runs triggered by a push as well, so that
+    # manually re-running CI on main does not republish; dispatch this workflow
+    # directly for that. A manual dispatch here carries no `workflow_run`
+    # context and is allowed through on its own terms.
+    if: >-
+      github.event_name == 'workflow_dispatch'
+      || (github.event.workflow_run.conclusion == 'success'
+          && github.event.workflow_run.event == 'push')
+
     # A cloud runner is enough. An earlier revision of this workflow moved the
     # job to the self-hosted `adlinux3` on the theory that Harbor only grants
     # push from inside the FNAL network - that was wrong. Publishing was failing
@@ -23,8 +55,24 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
+      # For `workflow_run`, GITHUB_SHA and GITHUB_REF point at the tip of the
+      # default branch rather than at the commit that triggered CI. Publishing
+      # what CI actually tested means taking both from the event payload.
+      - name: Resolve the commit being published
+        id: src
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "sha=${{ github.sha }}" >> "$GITHUB_OUTPUT"
+            echo "branch=${{ github.ref_name }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "sha=${{ github.event.workflow_run.head_sha }}" >> "$GITHUB_OUTPUT"
+            echo "branch=${{ github.event.workflow_run.head_branch }}" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          ref: ${{ steps.src.outputs.sha }}
 
       - name: Read version from Cargo.toml
         id: version
@@ -36,9 +84,9 @@ jobs:
         id: tags
         run: |
           VERSION="${{ steps.version.outputs.version }}"
-          if [ "${{ github.ref_name }}" != "main" ]; then
+          if [ "${{ steps.src.outputs.branch }}" != "main" ]; then
             # Branch-suffixed tags keep dispatch runs off :latest.
-            BRANCH=$(echo "${{ github.ref_name }}" | sed 's|/|-|g')
+            BRANCH=$(echo "${{ steps.src.outputs.branch }}" | sed 's|/|-|g')
             echo "primary=${IMAGE}:${VERSION}-${BRANCH}" >> "$GITHUB_OUTPUT"
             echo "moving=${IMAGE}:latest-${BRANCH}" >> "$GITHUB_OUTPUT"
           else
@@ -83,6 +131,7 @@ jobs:
             echo "- \`$PRIMARY\`"
             echo "- \`$MOVING\`"
             echo "- Digest: \`${DIGEST_REF:-unknown}\`"
+            echo "- Commit: \`${{ steps.src.outputs.sha }}\`"
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Docker logout
