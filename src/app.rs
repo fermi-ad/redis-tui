@@ -182,6 +182,28 @@ pub enum InputMode {
     SignalGen,
 }
 
+/// A pending confirmation, carrying the thing it is about.
+///
+/// The target is stored here rather than being re-read from the live selection
+/// when the user answers. The selection can move while the popup is open - the
+/// confirm popup is half the frame's width and does not cover the key list, and
+/// mouse input is not gated by `InputMode` - so re-reading it meant `y` acted on
+/// whatever happened to be selected at that moment rather than on the key the
+/// prompt named.
+#[derive(Debug, Clone, PartialEq)]
+pub enum ConfirmAction {
+    DeleteKey { key: String },
+}
+
+impl ConfirmAction {
+    /// The sentence shown in the confirmation popup, minus punctuation.
+    pub fn prompt(&self) -> String {
+        match self {
+            ConfirmAction::DeleteKey { key } => format!("Delete key '{}'", key),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum PlotFocus {
     Signal,
@@ -333,7 +355,7 @@ pub struct App {
     pub current_key_host: Option<String>,
 
     // Confirmation dialog
-    pub confirm_action: Option<String>,
+    pub confirm_action: Option<ConfirmAction>,
 
     // Edit state
     pub edit_operation: Option<EditOperation>,
@@ -728,7 +750,7 @@ impl App {
     }
 
     pub fn refresh_keys(&mut self, client: &mut MultiRedisClient) {
-        match client.scan_keys(&self.filter_pattern) {
+        let scan_ok = match client.scan_keys(&self.filter_pattern) {
             Ok((keys, skipped)) => {
                 // Get types for each key
                 let mut types = Vec::with_capacity(keys.len());
@@ -776,16 +798,41 @@ impl App {
                         self.key_list_state.select(Some(self.keys.len() - 1));
                     }
                 }
+                true
             }
             Err(e) => {
                 self.status_message = format!("Error scanning keys: {}", e);
+                false
             }
-        }
+        };
 
         self.db_size = client.get_db_size().unwrap_or(0);
         self.host_count = client.host_count();
         self.hosts_connected = client.num_connected();
         self.connected = client.is_connected();
+
+        // The value pane has to follow the key list. Only the selection *index*
+        // is preserved above, so any refresh that changes what that index points
+        // at - a filter change, a DB switch, or keys appearing and disappearing
+        // under `r` - would otherwise leave `current_value` and `current_key_info`
+        // describing the previously selected key while the list highlights a
+        // different one. `start_edit` reads the type from `current_key_info` and
+        // the name from the live selection, so that mismatch meant `s` prefilled
+        // the new key's editor with the old key's value and saving wrote it back
+        // under the new name.
+        //
+        // Doing it here rather than at each call site is deliberate: two of the
+        // five refresh sites already called `load_selected_value` explicitly and
+        // three did not, which is exactly how the mismatch survived.
+        //
+        // Only on a successful scan. If the scan failed, `self.keys` and the
+        // selection still describe the last good listing, so loading would issue
+        // further commands down a connection that just failed and replace the
+        // specific "Error scanning keys" message with a vaguer one from the
+        // value read - burying the actual cause.
+        if scan_ok {
+            self.load_selected_value(client);
+        }
     }
 
     pub fn load_selected_value(&mut self, client: &mut MultiRedisClient) {

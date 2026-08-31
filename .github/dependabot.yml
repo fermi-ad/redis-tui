@@ -1,0 +1,30 @@
+# Scheduled dependency updates.
+#
+# The advisory side of this is covered by the `audit` job in ci.yml, which
+# consults the RustSec database. This file is about routine currency: without
+# it the tree drifts by months of patch and minor releases between the
+# occasional manual `cargo update`.
+version: 2
+updates:
+  - package-ecosystem: cargo
+    directory: /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    # Patch and minor bumps for the same crate arrive as one PR rather than
+    # seven, so each one still costs a single Cargo.toml version bump under
+    # cargo-version-check.yml.
+    groups:
+      cargo-minor-patch:
+        update-types:
+          - minor
+          - patch
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      actions:
+        patterns:
+          - "*"

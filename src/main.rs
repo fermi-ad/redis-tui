@@ -4,7 +4,7 @@ mod redis_client;
 mod ui;
 
 use anyhow::{Context, Result};
-use app::{App, InputMode, Panel};
+use app::{App, ConfirmAction, InputMode, Panel};
 use clap::Parser;
 use crossterm::{
     event::{
@@ -862,7 +862,9 @@ fn handle_normal_input(
         }
         KeyCode::Char('d') => {
             if let Some(key) = app.selected_key_name() {
-                app.confirm_action = Some(format!("Delete key '{}'", key));
+                app.confirm_action = Some(ConfirmAction::DeleteKey {
+                    key: key.to_string(),
+                });
                 app.input_mode = InputMode::Confirm;
             }
         }
@@ -922,22 +924,23 @@ fn handle_filter_input(app: &mut App, client: &mut MultiRedisClient, code: KeyCo
 fn handle_confirm_input(app: &mut App, client: &mut MultiRedisClient, code: KeyCode) {
     match code {
         KeyCode::Char('y') | KeyCode::Char('Y') => {
-            // Execute the confirmed action
-            if app.confirm_action.is_some() {
-                if let Some(key) = app.selected_key_name().map(|s| s.to_string()) {
-                    match client.delete_key(&key) {
-                        Ok(_) => {
-                            app.status_message = format!("Deleted '{}'", key);
-                            app.current_value = None;
-                            app.current_key_info = None;
-                            app.plot_data.clear();
-                            app.refresh_keys(client);
-                        }
-                        Err(e) => {
-                            app.status_message = format!("Error deleting: {}", e);
-                        }
+            // Act on the target captured when the popup opened, not on whatever
+            // is selected now - a click can move the selection while it is open.
+            match app.confirm_action.take() {
+                Some(ConfirmAction::DeleteKey { key }) => match client.delete_key(&key) {
+                    Ok(_) => {
+                        app.current_value = None;
+                        app.current_key_info = None;
+                        app.plot_data.clear();
+                        app.refresh_keys(client);
+                        // After refresh_keys, which sets its own status message.
+                        app.status_message = format!("Deleted '{}'", key);
                     }
-                }
+                    Err(e) => {
+                        app.status_message = format!("Error deleting '{}': {}", key, e);
+                    }
+                },
+                None => {}
             }
             app.confirm_action = None;
             app.input_mode = InputMode::Normal;
@@ -994,7 +997,6 @@ fn handle_edit_input(
             if had_entries {
                 // Refresh after multi-entry session
                 app.refresh_keys(client);
-                app.load_selected_value(client);
             }
         }
         KeyCode::Tab => {
@@ -1025,9 +1027,9 @@ fn handle_edit_input(
                     } else {
                         // Single-entry operation, close popup
                         app.cancel_edit();
-                        app.status_message = format!("{} on '{}' OK", op_label, key);
                         app.refresh_keys(client);
-                        app.load_selected_value(client);
+                        // After refresh_keys, which sets its own status message.
+                        app.status_message = format!("{} on '{}' OK", op_label, key);
                     }
                 }
                 Err(e) => {

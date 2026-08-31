@@ -1245,7 +1245,7 @@ fn draw_confirm_popup(frame: &mut Frame, app: &App, area: Rect) {
     frame.render_widget(Clear, popup_area);
 
     let msg = if let Some(action) = &app.confirm_action {
-        format!("{}?\n\n[y] Yes  [n/Esc] No", action)
+        format!("{}?\n\n[y] Yes  [n/Esc] No", action.prompt())
     } else {
         "Confirm? [y/n]".to_string()
     };

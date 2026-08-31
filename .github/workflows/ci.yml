@@ -134,3 +134,59 @@ jobs:
             docker image ls redis-tui:ci --format '{{.Repository}}:{{.Tag}}  {{.Size}}'
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
+
+  # Advisory scan against the RustSec database.
+  #
+  # Dependabot is not a substitute. RUSTSEC-2026-0253 - a use-after-free in
+  # `lru`, reachable here through ratatui's render path - is not mirrored in
+  # GitHub's advisory database, so the repo reported zero open Dependabot
+  # alerts the whole time that advisory was live in Cargo.lock. The RustSec DB
+  # sees advisories GitHub's does not, and nothing in CI consulted it.
+  #
+  # Separate job so it reports as its own check and does not slow the build.
+  audit:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # cargo-audit is not preinstalled on the runner image and takes a couple
+      # of minutes to compile, so the built binary is cached on its own key.
+      # Bump the version in the key when bumping the version below.
+      - name: Cache cargo-audit
+        id: cache-audit
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/bin/cargo-audit
+          key: ${{ runner.os }}-cargo-audit-0.22
+
+      - name: Install cargo-audit
+        if: steps.cache-audit.outputs.cache-hit != 'true'
+        run: cargo install cargo-audit --locked --version ^0.22
+
+      # Vulnerabilities fail by default, but that default alone would not have
+      # caught either advisory this job was added for: RUSTSEC-2026-0190 (anyhow)
+      # and RUSTSEC-2026-0253 (lru) are both classified `unsound`, and plain
+      # `cargo audit` exits 0 on them. Verified against the pre-update lockfile -
+      # without `--deny unsound` the gate is a no-op here. `yanked` is promoted
+      # for the same reason. `unmaintained` is left as a warning deliberately: it
+      # fires on transitive crates that cannot be fixed from here, and
+      # hard-failing on it would train people to ignore CI.
+      #
+      # Do not pin cargo-audit below 0.22: 0.21 cannot parse the CVSS 4.0 vectors
+      # now present in the RustSec database and fails to load it at all, which
+      # looks like a scan failure rather than a tooling one.
+      - name: Audit
+        run: cargo audit --deny unsound --deny yanked
+
+      - name: Audit summary
+        if: always()
+        run: |
+          {
+            echo "### Advisory audit"
+            echo
+            echo "Source: RustSec advisory database (\`cargo audit\`)."
+            echo "Vulnerabilities, unsound and yanked crates fail the build;"
+            echo "unmaintained crates are reported as warnings only."
+          } >> "$GITHUB_STEP_SUMMARY"

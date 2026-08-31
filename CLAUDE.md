@@ -136,10 +136,12 @@ There is no `tests/` directory: this is a binary-only crate with no lib target, 
 - String values show decoded binary when a numeric DataType is selected (not String/Blob)
 - `RedisValue::Stream` entries are capped via `cap_stream_entries()` on load, refresh, and append
 - Arrow key navigation auto-loads the selected key's value (`load_selected_value`)
+- `refresh_keys()` reloads the selected value itself — it preserves the selection *index*, not the selected key, so callers must not be left holding a value that describes a different key
 - Mouse capture must be disabled before any blocking thread joins on exit (prevents terminal garbage)
 - Panic hook only runs terminal cleanup on the main thread
 - Version tests use `env!("CARGO_PKG_VERSION")` — never hardcode version strings
 - Never push directly to main without explicit permission — use feature branches and PRs
 - Never include Claude Code attribution in PRs or commits
 - Never include Co-Authored-By lines in commits
+- Confirmation popups carry their target in `ConfirmAction`; never re-read the live selection when the user answers, since mouse input is not gated by `InputMode`
 - `apply_plot_settings()` handles all field counts (X limits + per-slot Y limits) — no field count checks
