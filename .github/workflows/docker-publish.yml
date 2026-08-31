@@ -69,6 +69,21 @@ jobs:
             echo "branch=${{ github.event.workflow_run.head_branch }}" >> "$GITHUB_OUTPUT"
           fi
 
+      # actions/checkout v7 refuses to check out fork pull request code from a
+      # `workflow_run` or `pull_request_target` workflow, and that guard runs
+      # here rather than being skipped, because it is skipped only for a default
+      # self-checkout with no explicit `ref` - this one sets `ref`.
+      #
+      # It passes for two independent reasons, both worth recording so nobody
+      # has to re-derive them. The guard returns early unless
+      # `workflow_run.event` starts with "pull_request", and the job condition
+      # above already restricts this to `event == 'push'`. Even without that,
+      # its fork test compares `workflow_run.head_repository.id` against
+      # `repository.id`, which are equal for a push to this repo.
+      #
+      # So `allow-unsafe-pr-checkout` is deliberately NOT set. If this job is
+      # ever widened to publish from pull request runs, that analysis stops
+      # holding and the guard will correctly start failing the job.
       - name: Checkout
         uses: actions/checkout@v7
         with:
