@@ -109,6 +109,25 @@ fn parse_hosts_file(path: &str) -> Result<Vec<(String, String)>> {
         }
 
         match hosts::parse_host_entry(trimmed, &defaults) {
+            // A hosts file entry is pushed to `from_urls` verbatim, unparsed - so
+            // it must already be a URL `redis::Client::open` can connect with.
+            // Bare shorthand (e.g. `127.0.0.1:6379`) passes `parse_host_entry`
+            // (it is valid for `--hosts`), but pushing it here as-is would make
+            // `from_urls` reject it, and that failure is indistinguishable from
+            // the host being unreachable: it burns the whole retry budget and
+            // reports a live host as never having come up. Building a URL from
+            // the parsed entry instead would mean formatting credentials back
+            // into a string - the exact bug (#42) this parser exists to delete.
+            // So: reject bare shorthand here, with a message pointing at the URL
+            // form. This is temporary and restores exactly what 1.x did (the
+            // old `scheme_hint`); it disappears when `--hosts-file` is deleted
+            // in favour of `--hosts` (which does accept shorthand) in Task 3.
+            Ok(entry) if !trimmed.contains("://") => {
+                problems.push(format!(
+                    "  line {}: {}\n    hosts file entries must be full URLs - did you mean redis://{} ?",
+                    lineno, trimmed, entry.label
+                ));
+            }
             Ok(entry) => entries.push((entry.label, trimmed.to_string())),
             Err(e) => problems.push(format!("  line {}: {}\n    {}", lineno, trimmed, e)),
         }
@@ -1633,6 +1652,29 @@ mod tests {
         assert_eq!(hosts.len(), 2);
         assert_eq!(hosts[0].1, "redis://127.0.0.1:6379/0");
         assert_eq!(hosts[1].1, "redis://127.0.0.1:6380/1");
+    }
+
+    // Regression: a hosts file entry is pushed to `from_urls` as the original
+    // string, unparsed. Bare shorthand is valid for `--hosts` (parse_host_entry
+    // accepts it) but `redis::Client::open` cannot connect with it, and that
+    // failure looks exactly like an unreachable host - it burns the whole
+    // retry budget and reports a live host as never having come up. A hosts
+    // file entry must be a full URL until `--hosts-file` is removed.
+    #[test]
+    fn parse_hosts_rejects_bare_host_port_and_points_at_the_url_form() {
+        let err = parse_hosts_str("127.0.0.1:16399\n").expect_err("bare shorthand is not a URL");
+        let msg = err.to_string();
+        assert!(msg.contains("line 1"), "should name the line: {}", msg);
+        assert!(
+            msg.contains("127.0.0.1:16399"),
+            "should quote the entry: {}",
+            msg
+        );
+        assert!(
+            msg.contains("redis://127.0.0.1:16399"),
+            "should point at the URL form: {}",
+            msg
+        );
     }
 
     /// This build has no TLS: Cargo.toml declares `redis = "1.0"` with no TLS
