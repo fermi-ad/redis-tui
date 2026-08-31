@@ -31,7 +31,7 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       # Rust, clippy and rustfmt are preinstalled on GitHub-hosted ubuntu runners,
       # so no toolchain action is needed. Print the versions so a runner image
@@ -53,7 +53,7 @@ jobs:
           redis-server --version
 
       - name: Cache cargo registry and build
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: |
             ~/.cargo/registry/index
@@ -116,7 +116,7 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       # No `--target`, so this builds the final `publish` stage - the same thing
       # docker-publish.yml builds and ships.
@@ -149,14 +149,14 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       # cargo-audit is not preinstalled on the runner image and takes a couple
       # of minutes to compile, so the built binary is cached on its own key.
       # Bump the version in the key when bumping the version below.
       - name: Cache cargo-audit
         id: cache-audit
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: ~/.cargo/bin/cargo-audit
           key: ${{ runner.os }}-cargo-audit-0.22
