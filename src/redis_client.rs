@@ -845,6 +845,7 @@ mod tests {
     use super::*;
 
     use std::net::TcpListener;
+    use std::path::PathBuf;
     use std::process::{Child, Command, Stdio};
 
     /// Ask the OS for a currently-free port, then release it so redis-server can bind.
@@ -865,6 +866,7 @@ mod tests {
     struct TestRedis {
         child: Child,
         port: u16,
+        dir: PathBuf,
     }
 
     impl TestRedis {
@@ -887,9 +889,28 @@ mod tests {
         }
 
         fn try_start(port: u16) -> Result<Self, String> {
+            // Every server gets its own empty directory, and it is not optional.
+            // `--save ""` below stops this server *writing* a dump, but redis
+            // *loads* `dump.rdb` from `dir` at startup regardless, and `dir`
+            // defaults to the working directory - the package root under cargo.
+            // So any dump.rdb lying there is adopted as the server's starting
+            // dataset, and every key-listing assertion in these tests then sees
+            // somebody else's data. `start-dev.sh` used to leave exactly such a
+            // file behind, which made these tests fail on a developer machine
+            // and pass in CI, where the checkout is clean.
+            let dir = std::env::temp_dir().join(format!(
+                "redis-tui-test-{}-{}",
+                std::process::id(),
+                port
+            ));
+            std::fs::create_dir_all(&dir)
+                .map_err(|e| format!("could not create data directory {}: {e}", dir.display()))?;
+            let dir_arg = dir.to_string_lossy().into_owned();
+
             let child = Command::new("redis-server")
                 .args([
                     "--port", &port.to_string(),
+                    "--dir", &dir_arg,
                     "--save", "",
                     "--appendonly", "no",
                     "--loglevel", "warning",
@@ -898,10 +919,11 @@ mod tests {
                 .stderr(Stdio::null())
                 .spawn()
                 .map_err(|e| {
+                    let _ = std::fs::remove_dir_all(&dir);
                     format!("could not spawn redis-server ({e}); it must be installed to run --ignored tests")
                 })?;
 
-            let mut server = TestRedis { child, port };
+            let mut server = TestRedis { child, port, dir };
             let url = server.url();
 
             for _ in 0..100 {
@@ -938,6 +960,9 @@ mod tests {
         fn drop(&mut self) {
             let _ = self.child.kill();
             let _ = self.child.wait();
+            // Only after the child is reaped, so nothing can recreate the
+            // directory between the removal and the process actually exiting.
+            let _ = std::fs::remove_dir_all(&self.dir);
         }
     }
 
