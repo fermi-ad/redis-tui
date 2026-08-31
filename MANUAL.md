@@ -26,7 +26,7 @@ redis-tui [OPTIONS]
 
 | Flag | Environment | Description | Default |
 |------|-------------|-------------|---------|
-| `--hosts <HOSTS>...` | `REDIS_TUI_HOSTS` | Hosts: `host`, `host:port`, or a full `redis://` URL. Repeatable. | `127.0.0.1:6379` |
+| `--hosts <HOSTS>...` | `REDIS_TUI_HOSTS` | Hosts: `host`, `host:port`, or a full `redis://` URL. Repeatable. Accepts `--host` as a deprecated alias. | `127.0.0.1:6379` |
 | `--username <USERNAME>` | `REDIS_TUI_USERNAME` | Username for hosts without their own | None |
 | `--password <PASSWORD>` | `REDIS_TUI_PASSWORD` | Password for hosts without their own | None |
 | `-d, --db <DB>` | `REDIS_TUI_DB` | Database for hosts without their own | `0` |
@@ -62,11 +62,17 @@ REDIS_TUI_HOSTS="db1 db2:6380" redis-tui
 
 ### Migrating from 1.x
 
-`--host`, `--port`, `--url` and `--hosts-file` were removed in 2.0.0. One flag
-now names where to connect.
+`--port`, `--url` and `--hosts-file` were removed in 2.0.0. One flag now names
+where to connect.
+
+`--host` survives as a deprecated alias for `--hosts`, so a 1.x command that
+named a single host on the default port keeps working unchanged. Because
+`--port` is gone, anything that set a port must move to the `host:port` form.
+New commands should use `--hosts`; the alias is not shown in `--help`.
 
 | 1.x | 2.0 |
 |-----|-----|
+| `--host db1` | works as-is; `--hosts db1` preferred |
 | `--host db1 --port 6380` | `--hosts db1:6380` |
 | `--url redis://:pw@db1/2` | `--hosts redis://:pw@db1/2` |
 | `--hosts-file hosts.txt` | `--hosts $(grep -v '^#' hosts.txt \| tr '\n' ' ')` |

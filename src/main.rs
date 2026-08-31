@@ -33,8 +33,13 @@ use std::time::Duration;
 struct Args {
     /// Redis hosts: `host`, `host:port`, or a full `redis://` URL.
     /// Repeatable, and several may be given at once.
+    // `--host` is an alias, not a doc line: a 1.x command naming a single host
+    // keeps working, but advertising it in --help would undercut the point of
+    // there being one flag. `--port` is gone, so the alias only covers hosts on
+    // the default port, or the `host:port` form.
     #[arg(
         long,
+        alias = "host",
         num_args = 1..,
         action = clap::ArgAction::Append,
         value_delimiter = ' ',
@@ -1595,9 +1600,40 @@ mod tests {
         assert_eq!(a.db, 4);
     }
 
+    // 1.x scripts that named a single host keep working: `--host` stays as a
+    // hidden alias for `--hosts`. `--port` is gone, so anything that also set a
+    // port has to move to the `host:port` form.
+    #[test]
+    fn host_is_accepted_as_a_deprecated_alias_for_hosts() {
+        let a = Args::try_parse_from(["redis-tui", "--host", "db1"]).unwrap();
+        assert_eq!(a.hosts, vec!["db1".to_string()]);
+    }
+
+    #[test]
+    fn the_host_alias_carries_a_port_like_any_other_entry() {
+        let a = Args::try_parse_from(["redis-tui", "--host", "db1:6380"]).unwrap();
+        assert_eq!(a.hosts, vec!["db1:6380".to_string()]);
+    }
+
+    // The alias exists for scripts, not for discovery: advertising it in --help
+    // would undercut the point of there being one flag. Stripping `--hosts`
+    // first keeps this from matching the real flag's own name.
+    #[test]
+    fn the_host_alias_is_not_advertised_in_help() {
+        // `--help` renders the long form, which is where a doc comment's extra
+        // paragraphs land, so short help alone would not catch a leak.
+        let help = Args::command().render_long_help().to_string();
+        let without_the_real_flag = help.replace("--hosts", "");
+        assert!(
+            !without_the_real_flag.contains("--host"),
+            "--help should not mention the deprecated alias:\n{}",
+            help
+        );
+    }
+
     #[test]
     fn the_removed_flags_are_rejected() {
-        for flag in ["--host", "--port", "--url", "--hosts-file"] {
+        for flag in ["--port", "--url", "--hosts-file"] {
             assert!(
                 Args::try_parse_from(["redis-tui", flag, "x"]).is_err(),
                 "{} should no longer be accepted",
