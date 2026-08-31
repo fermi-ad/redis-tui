@@ -1,6 +1,13 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# Both nodes run with persistence off (--save '' --appendonly no).
+# Without it redis writes dump.rdb into whatever directory it was launched
+# from, which is the repo root, and the live tests then adopt that file as
+# their starting dataset - `dir` defaults to the working directory and an
+# existing dump.rdb is loaded at boot whether or not saving is enabled.
+# This is throwaway fixture data that FLUSHALL rebuilds on every run, so
+# there is nothing here worth persisting.
 REDIS_PORT_1=6379
 REDIS_PORT_2=6380
 HOSTS_FILE="/tmp/redis-tui-hosts.txt"
@@ -26,7 +33,8 @@ if redis-cli -p "$REDIS_PORT_1" ping &>/dev/null; then
     echo "[*] Redis node 1 already running on port $REDIS_PORT_1"
 else
     echo "[*] Starting redis node 1 on port $REDIS_PORT_1..."
-    redis-server --port "$REDIS_PORT_1" --daemonize yes --loglevel warning
+    redis-server --port "$REDIS_PORT_1" --daemonize yes --loglevel warning \
+        --save '' --appendonly no
     sleep 1
     if ! redis-cli -p "$REDIS_PORT_1" ping &>/dev/null; then
         echo "ERROR: Failed to start redis node 1"
@@ -40,7 +48,8 @@ if redis-cli -p "$REDIS_PORT_2" ping &>/dev/null; then
     echo "[*] Redis node 2 already running on port $REDIS_PORT_2"
 else
     echo "[*] Starting redis node 2 on port $REDIS_PORT_2..."
-    redis-server --port "$REDIS_PORT_2" --daemonize yes --loglevel warning
+    redis-server --port "$REDIS_PORT_2" --daemonize yes --loglevel warning \
+        --save '' --appendonly no
     sleep 1
     if ! redis-cli -p "$REDIS_PORT_2" ping &>/dev/null; then
         echo "ERROR: Failed to start redis node 2"
