@@ -31,127 +31,60 @@ use std::time::Duration;
     about = "A Redis TUI client inspired by Redis Insight"
 )]
 struct Args {
-    /// Redis host
-    #[arg(long, default_value = "127.0.0.1")]
-    host: String,
+    /// Redis hosts: `host`, `host:port`, or a full `redis://` URL.
+    /// Repeatable, and several may be given at once.
+    #[arg(
+        long,
+        num_args = 1..,
+        action = clap::ArgAction::Append,
+        value_delimiter = ' ',
+        default_value = "127.0.0.1:6379",
+        env = "REDIS_TUI_HOSTS"
+    )]
+    hosts: Vec<String>,
 
-    /// Redis port
-    #[arg(short, long, default_value_t = 6379)]
-    port: u16,
+    /// Username for hosts that do not carry their own
+    #[arg(long, env = "REDIS_TUI_USERNAME")]
+    username: Option<String>,
 
-    /// Redis password
-    #[arg(long)]
+    /// Password for hosts that do not carry their own
+    #[arg(long, env = "REDIS_TUI_PASSWORD")]
     password: Option<String>,
 
-    /// Redis database number
-    #[arg(short, long, default_value_t = 0)]
+    /// Database number for hosts that do not carry their own
+    #[arg(short, long, default_value_t = 0, env = "REDIS_TUI_DB")]
     db: u16,
 
-    /// Path to hosts file (one Redis URL per line, # for comments).
-    /// Connects to all listed hosts and aggregates keys.
-    #[arg(long)]
-    hosts_file: Option<String>,
-
     /// Rolling window for ingestion rate chart history (minutes)
-    #[arg(long, default_value_t = 20, value_parser = clap::value_parser!(u64).range(1..))]
+    #[arg(long, default_value_t = 20, env = "REDIS_TUI_RATE_HISTORY",
+          value_parser = clap::value_parser!(u64).range(1..))]
     rate_history: u64,
 
     /// Sliding window for the plotted ingestion rate line (seconds)
-    #[arg(long, default_value_t = 2, value_parser = clap::value_parser!(u64).range(1..))]
+    #[arg(long, default_value_t = 2, env = "REDIS_TUI_RATE_AVG_WINDOW",
+          value_parser = clap::value_parser!(u64).range(1..))]
     rate_avg_window: u64,
 
-    /// Retry attempts for a multi-host entry that is not up yet
-    #[arg(long, default_value_t = 5, value_parser = clap::value_parser!(u32).range(0..))]
+    /// Retry attempts for a host that is not up yet
+    #[arg(long, default_value_t = 5, env = "REDIS_TUI_CONNECT_RETRIES",
+          value_parser = clap::value_parser!(u32).range(0..))]
     connect_retries: u32,
 
-    /// Socket timeout per connection attempt in multi-host mode (seconds)
-    #[arg(long, default_value_t = 3, value_parser = clap::value_parser!(u64).range(1..))]
+    /// Socket timeout per connection attempt (seconds)
+    #[arg(long, default_value_t = 3, env = "REDIS_TUI_CONNECT_TIMEOUT",
+          value_parser = clap::value_parser!(u64).range(1..))]
     connect_timeout: u64,
-}
-
-/// Read a hosts file, one entry per line, `#` for comments.
-///
-/// Temporary: `--hosts-file` is removed in favour of `--hosts` in a later
-/// commit. Until then this keeps working, delegating each line to the shared
-/// entry parser so there is only one grammar.
-fn parse_hosts_file(path: &str) -> Result<Vec<hosts::HostEntry>> {
-    let content = std::fs::read_to_string(path)
-        .with_context(|| format!("Failed to read hosts file: {}", path))?;
-
-    let defaults = hosts::HostDefaults::default();
-    let mut entries = Vec::new();
-    let mut problems: Vec<String> = Vec::new();
-
-    for (i, line) in content.lines().enumerate() {
-        // Physical line number, so blanks and comments above a bad entry do not
-        // shift what gets reported back to the user.
-        let lineno = i + 1;
-        let trimmed = line.trim();
-        if trimmed.is_empty() || trimmed.starts_with('#') {
-            continue;
-        }
-
-        match hosts::parse_host_entry(trimmed, &defaults) {
-            // A hosts file entry is pushed to `from_entries` verbatim - so it
-            // must already be a URL `redis::Client::open` can connect with.
-            // Bare shorthand (e.g. `127.0.0.1:6379`) passes `parse_host_entry`
-            // (it is valid for `--hosts`), but pushing it here as-is would make
-            // `from_entries` reject it, and that failure is indistinguishable
-            // from the host being unreachable: it burns the whole retry budget
-            // and reports a live host as never having come up. So: reject bare
-            // shorthand here, with a message pointing at the URL form. This is
-            // temporary and restores exactly what 1.x did (the old
-            // `scheme_hint`); it disappears when `--hosts-file` is deleted in
-            // favour of `--hosts` (which does accept shorthand) in Task 3.
-            Ok(entry) if !trimmed.contains("://") => {
-                problems.push(format!(
-                    "  line {}: {}\n    hosts file entries must be full URLs - did you mean redis://{} ?",
-                    lineno, trimmed, entry.label
-                ));
-            }
-            Ok(entry) => entries.push(entry),
-            Err(e) => problems.push(format!("  line {}: {}\n    {}", lineno, trimmed, e)),
-        }
-    }
-
-    if !problems.is_empty() {
-        anyhow::bail!(
-            "Hosts file '{}' has {} invalid {}:\n{}",
-            path,
-            problems.len(),
-            if problems.len() == 1 {
-                "entry"
-            } else {
-                "entries"
-            },
-            problems.join("\n")
-        );
-    }
-
-    if entries.is_empty() {
-        anyhow::bail!("Hosts file '{}' contains no valid URLs", path);
-    }
-
-    Ok(entries)
 }
 
 fn main() -> Result<()> {
     let args = Args::parse();
 
-    // Connect to Redis (single or multi-host). Both cases become a list of
-    // `HostEntry` and go through the one connection path.
     let defaults = hosts::HostDefaults {
-        username: None,
+        username: args.username.clone(),
         password: args.password.clone(),
         db: args.db,
     };
-    let entries = if let Some(ref hosts_path) = args.hosts_file {
-        parse_hosts_file(hosts_path)?
-    } else {
-        let entry = hosts::parse_host_entry(&format!("{}:{}", args.host, args.port), &defaults)
-            .map_err(|e| anyhow::anyhow!("{}", e))?;
-        vec![entry]
-    };
+    let entries = hosts::parse_host_entries(&args.hosts, &defaults)?;
     eprintln!("Connecting to {} host(s)...", entries.len());
     let mut client = MultiRedisClient::from_entries(
         &entries,
@@ -1353,6 +1286,7 @@ fn handle_mouse_event(app: &mut App, mouse: MouseEvent) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use clap::CommandFactory;
 
     fn make_app_with_fields(freq: &str, amp: &str, noise: &str, samples: &str, rate: &str) -> App {
         let mut app = App::new();
@@ -1629,120 +1563,86 @@ mod tests {
         );
     }
 
-    // ─── parse_hosts_file ────────────────────────────────────
+    // ─── CLI parsing ─────────────────────────────────────────
 
-    /// Write `content` to a temp file and parse it. Returns the parse result so a
-    /// test can assert on either the hosts or the error text.
-    fn parse_hosts_str(content: &str) -> Result<Vec<hosts::HostEntry>> {
-        let dir = std::env::temp_dir();
-        let path = dir.join(format!(
-            "redis-tui-hosts-test-{}-{:?}.txt",
-            std::process::id(),
-            std::thread::current().id()
-        ));
-        std::fs::write(&path, content).unwrap();
-        let result = parse_hosts_file(path.to_str().unwrap());
-        let _ = std::fs::remove_file(&path);
-        result
+    // Environment variables are process-global and cargo runs tests as threads,
+    // so these drive the parser with an explicit argv rather than mutating the
+    // real environment, which would make them order-dependent.
+    #[test]
+    fn hosts_defaults_to_localhost() {
+        let a = Args::try_parse_from(["redis-tui"]).unwrap();
+        assert_eq!(a.hosts, vec!["127.0.0.1:6379".to_string()]);
+        assert_eq!(a.db, 0);
+        assert_eq!(a.username, None);
     }
 
     #[test]
-    fn parse_hosts_accepts_a_valid_file_with_comments_and_blanks() {
-        let hosts = parse_hosts_str(
-            "# leading comment\n\nredis://127.0.0.1:6379/0\n\n# another\nredis://127.0.0.1:6380/1\n",
-        )
-        .expect("valid file should parse");
-        assert_eq!(hosts.len(), 2);
-        assert_eq!(hosts[0].label, "127.0.0.1:6379");
-        assert_eq!(hosts[1].label, "127.0.0.1:6380");
-    }
-
-    // Regression: a hosts file entry is pushed to `from_entries` as the original
-    // string, unparsed. Bare shorthand is valid for `--hosts` (parse_host_entry
-    // accepts it) but `redis::Client::open` cannot connect with it, and that
-    // failure looks exactly like an unreachable host - it burns the whole
-    // retry budget and reports a live host as never having come up. A hosts
-    // file entry must be a full URL until `--hosts-file` is removed.
-    #[test]
-    fn parse_hosts_rejects_bare_host_port_and_points_at_the_url_form() {
-        let err = parse_hosts_str("127.0.0.1:16399\n").expect_err("bare shorthand is not a URL");
-        let msg = err.to_string();
-        assert!(msg.contains("line 1"), "should name the line: {}", msg);
-        assert!(
-            msg.contains("127.0.0.1:16399"),
-            "should quote the entry: {}",
-            msg
-        );
-        assert!(
-            msg.contains("redis://127.0.0.1:16399"),
-            "should point at the URL form: {}",
-            msg
-        );
-    }
-
-    /// This build has no TLS: Cargo.toml declares `redis = "1.0"` with no TLS
-    /// feature, so redis-rs refuses a `rediss://` URL outright. Reporting that at
-    /// parse time is the point - previously the entry was accepted, then spent the
-    /// whole retry budget failing to connect before being silently dropped.
-    #[test]
-    fn parse_hosts_rejects_rediss_because_tls_is_not_compiled_in() {
-        let err = parse_hosts_str("rediss://example.com:6380/0\n")
-            .expect_err("this build has no TLS support");
-        let msg = err.to_string();
-        assert!(msg.contains("line 1"), "should name the line: {}", msg);
-        assert!(
-            msg.to_lowercase().contains("tls"),
-            "should say why, mentioning TLS: {}",
-            msg
-        );
+    fn hosts_accepts_several_space_separated_values() {
+        let a = Args::try_parse_from(["redis-tui", "--hosts", "db1", "db2:6380"]).unwrap();
+        assert_eq!(a.hosts, vec!["db1".to_string(), "db2:6380".to_string()]);
     }
 
     #[test]
-    fn parse_hosts_rejects_a_url_with_no_host() {
-        let err = parse_hosts_str("redis://\n").expect_err("no host is not usable");
-        assert!(err.to_string().contains("line 1"), "{}", err);
+    fn hosts_is_repeatable() {
+        let a = Args::try_parse_from(["redis-tui", "--hosts", "db1", "--hosts", "db2"]).unwrap();
+        assert_eq!(a.hosts, vec!["db1".to_string(), "db2".to_string()]);
     }
 
     #[test]
-    fn parse_hosts_rejects_outright_garbage() {
-        let err = parse_hosts_str("!!! not a url at all\n").expect_err("garbage is not a URL");
-        assert!(err.to_string().contains("line 1"), "{}", err);
+    fn a_following_flag_is_not_swallowed_by_the_hosts_list() {
+        let a = Args::try_parse_from(["redis-tui", "--hosts", "db1", "db2", "--db", "4"]).unwrap();
+        assert_eq!(a.hosts, vec!["db1".to_string(), "db2".to_string()]);
+        assert_eq!(a.db, 4);
     }
 
     #[test]
-    fn parse_hosts_reports_every_bad_line_not_just_the_first() {
-        let err =
-            parse_hosts_str("localhost:notaport\nredis://127.0.0.1:6379\nalso-bad:notaport\n")
-                .expect_err("two bad lines");
-        let msg = err.to_string();
-        assert!(
-            msg.contains("localhost:notaport"),
-            "first bad entry: {}",
-            msg
-        );
-        assert!(
-            msg.contains("also-bad:notaport"),
-            "second bad entry: {}",
-            msg
-        );
+    fn the_removed_flags_are_rejected() {
+        for flag in ["--host", "--port", "--url", "--hosts-file"] {
+            assert!(
+                Args::try_parse_from(["redis-tui", flag, "x"]).is_err(),
+                "{} should no longer be accepted",
+                flag
+            );
+        }
     }
 
     #[test]
-    fn parse_hosts_line_numbers_count_blanks_and_comments() {
-        // The bad entry is on physical line 4; blanks and comments above it must
-        // not shift the number that gets reported.
-        let err = parse_hosts_str("# comment\n\n\nbad-entry:notaport\n").expect_err("bad entry");
-        let msg = err.to_string();
-        assert!(
-            msg.contains("line 4"),
-            "should report physical line 4, got: {}",
-            msg
-        );
+    fn username_and_password_are_accepted() {
+        let a = Args::try_parse_from([
+            "redis-tui",
+            "--hosts",
+            "db1",
+            "--username",
+            "admin",
+            "--password",
+            "s3cret",
+        ])
+        .unwrap();
+        assert_eq!(a.username.as_deref(), Some("admin"));
+        assert_eq!(a.password.as_deref(), Some("s3cret"));
     }
 
     #[test]
-    fn parse_hosts_rejects_a_file_with_no_entries() {
-        let err = parse_hosts_str("# only a comment\n\n").expect_err("nothing usable");
-        assert!(err.to_string().contains("no valid URLs"), "{}", err);
+    fn numeric_ranges_are_still_enforced() {
+        assert!(Args::try_parse_from(["redis-tui", "--connect-timeout", "0"]).is_err());
+        assert!(Args::try_parse_from(["redis-tui", "--rate-history", "0"]).is_err());
+        assert!(Args::try_parse_from(["redis-tui", "--rate-avg-window", "0"]).is_err());
+    }
+
+    #[test]
+    fn help_advertises_the_environment_variables() {
+        let help = Args::command().render_help().to_string();
+        for var in [
+            "REDIS_TUI_HOSTS",
+            "REDIS_TUI_USERNAME",
+            "REDIS_TUI_PASSWORD",
+            "REDIS_TUI_DB",
+            "REDIS_TUI_RATE_HISTORY",
+            "REDIS_TUI_RATE_AVG_WINDOW",
+            "REDIS_TUI_CONNECT_RETRIES",
+            "REDIS_TUI_CONNECT_TIMEOUT",
+        ] {
+            assert!(help.contains(var), "--help should mention {}", var);
+        }
     }
 }

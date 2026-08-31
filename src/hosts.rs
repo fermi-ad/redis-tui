@@ -31,10 +31,8 @@ pub struct HostEntry {
     /// `host:port`, shown in the host column and in status messages. Never
     /// contains credentials.
     pub label: String,
-    // Read by the client construction that consumes `HostEntry` starting in
-    // the next commit. The transitional `parse_hosts_file` in main.rs only
-    // needs `label` for now, so rustc sees this field as dead in this build.
-    #[allow(dead_code)]
+    /// Built programmatically, never by formatting a URL, so a password
+    /// containing URL metacharacters survives to the connection verbatim.
     pub info: ConnectionInfo,
 }
 
