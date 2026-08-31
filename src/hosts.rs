@@ -78,13 +78,8 @@ pub fn parse_host_entry(entry: &str, defaults: &HostDefaults) -> Result<HostEntr
     Ok(HostEntry { label, info })
 }
 
-/// Parse every entry, reporting all the bad ones at once.
-///
-/// Unreachable from `main()` in this commit: `--hosts-file` validates line by
-/// line through `parse_host_entry` directly, so each error can be tagged with
-/// its physical line number, which this batch entry point has no way to know.
-/// It is wired up to the `--hosts` flag in a later commit.
-#[allow(dead_code)]
+/// Parse every entry, reporting all the bad ones at once, so one run tells the
+/// user everything to fix rather than one problem per attempt.
 pub fn parse_host_entries(entries: &[String], defaults: &HostDefaults) -> Result<Vec<HostEntry>> {
     if entries.is_empty() {
         bail!("No hosts given");

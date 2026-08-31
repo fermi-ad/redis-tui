@@ -24,18 +24,19 @@
 redis-tui [OPTIONS]
 ```
 
-| Flag | Description | Default |
-|------|-------------|---------|
-| `--host <HOST>` | Redis host | `127.0.0.1` |
-| `-p, --port <PORT>` | Redis port | `6379` |
-| `--password <PASSWORD>` | Redis password | None |
-| `-d, --db <DB>` | Redis database number | `0` |
-| `-u, --url <URL>` | Full Redis URL (overrides host/port/password/db) | None |
-| `--hosts-file <PATH>` | Path to hosts file for multi-host mode | None |
-| `--rate-history <MINUTES>` | Rolling window for the ingestion rate chart | `20` |
-| `--rate-avg-window <SECONDS>` | Sliding average window for the plotted rate line | `2` |
-| `--connect-retries <N>` | Retry attempts for a multi-host entry that is not up yet | `5` |
-| `--connect-timeout <SECONDS>` | Socket timeout per connection attempt in multi-host mode | `3` |
+| Flag | Environment | Description | Default |
+|------|-------------|-------------|---------|
+| `--hosts <HOSTS>...` | `REDIS_TUI_HOSTS` | Hosts: `host`, `host:port`, or a full `redis://` URL. Repeatable. | `127.0.0.1:6379` |
+| `--username <USERNAME>` | `REDIS_TUI_USERNAME` | Username for hosts without their own | None |
+| `--password <PASSWORD>` | `REDIS_TUI_PASSWORD` | Password for hosts without their own | None |
+| `-d, --db <DB>` | `REDIS_TUI_DB` | Database for hosts without their own | `0` |
+| `--rate-history <MINUTES>` | `REDIS_TUI_RATE_HISTORY` | Rolling window for the rate chart | `20` |
+| `--rate-avg-window <SECONDS>` | `REDIS_TUI_RATE_AVG_WINDOW` | Sliding average for the plotted rate line | `2` |
+| `--connect-retries <N>` | `REDIS_TUI_CONNECT_RETRIES` | Retries for a host that is not up yet | `5` |
+| `--connect-timeout <SECONDS>` | `REDIS_TUI_CONNECT_TIMEOUT` | Socket timeout per attempt | `3` |
+
+A flag beats its environment variable, which beats the default. `--help` prints
+each variable next to its flag.
 
 ### Examples
 
@@ -44,52 +45,70 @@ redis-tui [OPTIONS]
 redis-tui
 
 # Remote host with custom port
-redis-tui --host 10.0.0.5 --port 6380
+redis-tui --hosts 10.0.0.5:6380
 
 # Authenticated connection
-redis-tui --host myredis --password secret
+redis-tui --hosts myredis --password secret
 
 # Full URL with database selection
-redis-tui --url redis://:password@host:6379/2
+redis-tui --hosts redis://:password@host:6379/2
 
-# Multi-host aggregation
-redis-tui --hosts-file hosts.txt
+# Several hosts aggregated into one view
+redis-tui --hosts db1 db2:6380 redis://svc:pw@db3/2
+
+# The same, from the environment
+REDIS_TUI_HOSTS="db1 db2:6380" redis-tui
 ```
+
+### Migrating from 1.x
+
+`--host`, `--port`, `--url` and `--hosts-file` were removed in 2.0.0. One flag
+now names where to connect.
+
+| 1.x | 2.0 |
+|-----|-----|
+| `--host db1 --port 6380` | `--hosts db1:6380` |
+| `--url redis://:pw@db1/2` | `--hosts redis://:pw@db1/2` |
+| `--hosts-file hosts.txt` | `--hosts $(grep -v '^#' hosts.txt \| tr '\n' ' ')` |
+
+Entries mix freely, and `--username`/`--password`/`--db` apply to any entry that
+does not carry its own:
+
+    redis-tui --hosts db1 db2:6380 redis://svc:pw@db3/2 \
+              --username admin --password s3cret --db 1
 
 ---
 
 ## Connecting to Redis
 
-### Single Host
+### Host Entries
 
-By default, redis-tui connects to `127.0.0.1:6379`. Use `--host`, `--port`, and `--password` flags, or provide a full URL with `--url`.
+`--hosts` takes one or more entries. It is repeatable, and several entries may
+follow it at once. Each entry is one of three forms:
 
-The URL format is: `redis://[:password@]host:port[/db]`
+| Form | Example | Port | Credentials and database |
+|------|---------|------|--------------------------|
+| Bare host | `db1` | `6379` | From `--username`/`--password`/`--db` |
+| `host:port` | `db1:6380` | As given | From `--username`/`--password`/`--db` |
+| Full URL | `redis://svc:pw@db1:6380/2` | As given | Self-contained; the flags are ignored |
 
-### Multi-Host Mode
+A URL entry carries everything it needs, so hosts with different credentials can
+sit side by side in one list.
 
-Create a hosts file with one Redis URL per line. Lines starting with `#` are comments. Blank lines are skipped.
+Connection details are built programmatically rather than by formatting a URL
+string, so a password containing `/`, `#`, `?` or `@` connects verbatim instead
+of being mangled.
 
-```
-# hosts.txt
-redis://127.0.0.1:6379/0
-redis://127.0.0.1:6380/0
-redis://:password@10.0.0.5:6379/0
-```
-
-Run with: `redis-tui --hosts-file hosts.txt`
-
-Every entry is validated before any connection is attempted, using the same URL
-parser the client itself uses. If any line is unparseable the run stops and lists
-all of them at once, with physical line numbers, so one run tells you everything
-to fix:
+Every entry is validated before any connection is attempted. If any entry is
+unparseable the run stops and lists all of them at once, so one run tells you
+everything to fix:
 
 ```
-Error: Hosts file 'hosts.txt' has 2 invalid entries:
-  line 3: localhost:6379
-    Redis URL did not parse - InvalidClientConfig - did you mean redis://localhost:6379 ?
-  line 7: !!! junk
-    Redis URL did not parse - InvalidClientConfig
+Error: 2 invalid host entries:
+  localhost:70000
+    invalid port '70000'
+  !!!
+    '!!!' is not a valid host
 ```
 
 **TLS is not supported.** This build declares `redis = "1.0"` with no TLS
@@ -434,7 +453,8 @@ Press `a` to reset to auto-fit limits after manual panning/zooming.
 
 ## Multi-Host Mode
 
-When using `--hosts-file`, redis-tui connects to all listed hosts and aggregates their keys into a single view.
+When `--hosts` names more than one host, redis-tui connects to all of them and
+aggregates their keys into a single view.
 
 ### Key Collision Handling
 
@@ -444,4 +464,4 @@ If the same key name exists on multiple hosts:
 
 ### Host Labels
 
-Host labels are derived from the URL (the `host:port` portion, with auth stripped). These appear in the status bar and collision warnings to identify which host a key belongs to.
+Host labels are derived from the entry (the `host:port` portion, with auth stripped). These appear in the status bar and collision warnings to identify which host a key belongs to.

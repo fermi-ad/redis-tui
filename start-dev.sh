@@ -10,7 +10,6 @@ set -euo pipefail
 # there is nothing here worth persisting.
 REDIS_PORT_1=6379
 REDIS_PORT_2=6380
-HOSTS_FILE="/tmp/redis-tui-hosts.txt"
 
 echo "=== Redis TUI Dev Environment (Multi-Host) ==="
 
@@ -265,22 +264,14 @@ echo "  shared:active_users"
 $CLI2 -n 1 SET "db1:node2_key" "This is in database 1 on node 2" >/dev/null
 $CLI2 -n 1 HSET "db1:info" description "DB 1 on node 2" purpose "collision test" >/dev/null
 
-# ─── Write hosts file ────────────────────────────────────
-cat > "$HOSTS_FILE" <<EOF
-# Redis TUI multi-host dev config
-redis://127.0.0.1:${REDIS_PORT_1}/0
-redis://127.0.0.1:${REDIS_PORT_2}/0
-EOF
-
 # ─── Summary ──────────────────────────────────────────────
 echo ""
 echo "=== Test Data Loaded ==="
 echo "Node 1 (port $REDIS_PORT_1) keys in DB 0: $($CLI1 DBSIZE | tr -d '\r')"
 echo "Node 2 (port $REDIS_PORT_2) keys in DB 0: $($CLI2 DBSIZE | tr -d '\r')"
 echo "Collision keys: shared:collision_test, shared:status, shared:active_users"
-echo "Hosts file: $HOSTS_FILE"
 echo ""
 echo "=== Starting Redis TUI (multi-host) ==="
 echo ""
 
-cargo run -- --hosts-file "$HOSTS_FILE"
+cargo run -- --hosts "127.0.0.1:${REDIS_PORT_1}" "127.0.0.1:${REDIS_PORT_2}"
