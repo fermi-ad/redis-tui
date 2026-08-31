@@ -47,10 +47,6 @@ struct Args {
     #[arg(short, long, default_value_t = 0)]
     db: u16,
 
-    /// Full Redis URL (overrides host/port/password/db)
-    #[arg(short, long)]
-    url: Option<String>,
-
     /// Path to hosts file (one Redis URL per line, # for comments).
     /// Connects to all listed hosts and aggregates keys.
     #[arg(long)]
@@ -73,25 +69,12 @@ struct Args {
     connect_timeout: u64,
 }
 
-impl Args {
-    fn redis_url(&self) -> String {
-        if let Some(url) = &self.url {
-            return url.clone();
-        }
-        let auth = match &self.password {
-            Some(pw) => format!(":{}@", pw),
-            None => String::new(),
-        };
-        format!("redis://{}{}:{}/{}", auth, self.host, self.port, self.db)
-    }
-}
-
 /// Read a hosts file, one entry per line, `#` for comments.
 ///
 /// Temporary: `--hosts-file` is removed in favour of `--hosts` in a later
 /// commit. Until then this keeps working, delegating each line to the shared
-/// entry parser so there is only one grammar. Returns (label, url) pairs.
-fn parse_hosts_file(path: &str) -> Result<Vec<(String, String)>> {
+/// entry parser so there is only one grammar.
+fn parse_hosts_file(path: &str) -> Result<Vec<hosts::HostEntry>> {
     let content = std::fs::read_to_string(path)
         .with_context(|| format!("Failed to read hosts file: {}", path))?;
 
@@ -109,26 +92,24 @@ fn parse_hosts_file(path: &str) -> Result<Vec<(String, String)>> {
         }
 
         match hosts::parse_host_entry(trimmed, &defaults) {
-            // A hosts file entry is pushed to `from_urls` verbatim, unparsed - so
-            // it must already be a URL `redis::Client::open` can connect with.
+            // A hosts file entry is pushed to `from_entries` verbatim - so it
+            // must already be a URL `redis::Client::open` can connect with.
             // Bare shorthand (e.g. `127.0.0.1:6379`) passes `parse_host_entry`
             // (it is valid for `--hosts`), but pushing it here as-is would make
-            // `from_urls` reject it, and that failure is indistinguishable from
-            // the host being unreachable: it burns the whole retry budget and
-            // reports a live host as never having come up. Building a URL from
-            // the parsed entry instead would mean formatting credentials back
-            // into a string - the exact bug (#42) this parser exists to delete.
-            // So: reject bare shorthand here, with a message pointing at the URL
-            // form. This is temporary and restores exactly what 1.x did (the
-            // old `scheme_hint`); it disappears when `--hosts-file` is deleted
-            // in favour of `--hosts` (which does accept shorthand) in Task 3.
+            // `from_entries` reject it, and that failure is indistinguishable
+            // from the host being unreachable: it burns the whole retry budget
+            // and reports a live host as never having come up. So: reject bare
+            // shorthand here, with a message pointing at the URL form. This is
+            // temporary and restores exactly what 1.x did (the old
+            // `scheme_hint`); it disappears when `--hosts-file` is deleted in
+            // favour of `--hosts` (which does accept shorthand) in Task 3.
             Ok(entry) if !trimmed.contains("://") => {
                 problems.push(format!(
                     "  line {}: {}\n    hosts file entries must be full URLs - did you mean redis://{} ?",
                     lineno, trimmed, entry.label
                 ));
             }
-            Ok(entry) => entries.push((entry.label, trimmed.to_string())),
+            Ok(entry) => entries.push(entry),
             Err(e) => problems.push(format!("  line {}: {}\n    {}", lineno, trimmed, e)),
         }
     }
@@ -157,20 +138,26 @@ fn parse_hosts_file(path: &str) -> Result<Vec<(String, String)>> {
 fn main() -> Result<()> {
     let args = Args::parse();
 
-    // Connect to Redis (single or multi-host)
-    let mut client = if let Some(ref hosts_path) = args.hosts_file {
-        let hosts = parse_hosts_file(hosts_path)?;
-        eprintln!("Connecting to {} hosts...", hosts.len());
-        MultiRedisClient::from_urls(
-            &hosts,
-            args.connect_retries,
-            Duration::from_secs(args.connect_timeout),
-        )?
-    } else {
-        let url = args.redis_url();
-        MultiRedisClient::from_single(&url)
-            .with_context(|| format!("Failed to connect to Redis at {}", url))?
+    // Connect to Redis (single or multi-host). Both cases become a list of
+    // `HostEntry` and go through the one connection path.
+    let defaults = hosts::HostDefaults {
+        username: None,
+        password: args.password.clone(),
+        db: args.db,
     };
+    let entries = if let Some(ref hosts_path) = args.hosts_file {
+        parse_hosts_file(hosts_path)?
+    } else {
+        let entry = hosts::parse_host_entry(&format!("{}:{}", args.host, args.port), &defaults)
+            .map_err(|e| anyhow::anyhow!("{}", e))?;
+        vec![entry]
+    };
+    eprintln!("Connecting to {} host(s)...", entries.len());
+    let mut client = MultiRedisClient::from_entries(
+        &entries,
+        args.connect_retries,
+        Duration::from_secs(args.connect_timeout),
+    )?;
 
     // Install panic hook that restores the terminal before printing the panic.
     // Only run cleanup on the main thread — a background thread panic should not
@@ -236,8 +223,15 @@ struct StreamListener {
 }
 
 impl StreamListener {
-    fn start(url: &str, key: &str, last_id: &str, db: i64) -> Option<Self> {
-        let mut client = RedisClient::connect(url).ok()?;
+    fn start(
+        info: redis::ConnectionInfo,
+        label: &str,
+        key: &str,
+        last_id: &str,
+        db: i64,
+    ) -> Option<Self> {
+        let mut client =
+            RedisClient::connect_with_info(info, label, std::time::Duration::from_secs(10)).ok()?;
         if db != 0 {
             client.select_db(db).ok()?;
         }
@@ -305,8 +299,15 @@ struct SignalGenerator {
 }
 
 impl SignalGenerator {
-    fn start(url: &str, key: &str, db: i64, config: app::SignalGenConfig) -> Option<Self> {
-        let mut client = RedisClient::connect(url).ok()?;
+    fn start(
+        info: redis::ConnectionInfo,
+        label: &str,
+        key: &str,
+        db: i64,
+        config: app::SignalGenConfig,
+    ) -> Option<Self> {
+        let mut client =
+            RedisClient::connect_with_info(info, label, std::time::Duration::from_secs(10)).ok()?;
         if db != 0 {
             client.select_db(db).ok()?;
         }
@@ -512,10 +513,11 @@ fn run_app(
                                         .unwrap_or(10.0),
                                 };
                                 if let Some(k) = app.selected_key_name().map(|s| s.to_string()) {
-                                    let key_url = client.url_for_key(&k).to_string();
-                                    if let Some(sg) =
-                                        SignalGenerator::start(&key_url, &k, app.db, config)
-                                    {
+                                    let key_info = client.info_for_key(&k);
+                                    let key_label = client.host_label_for_key(&k).to_string();
+                                    if let Some(sg) = SignalGenerator::start(
+                                        key_info, &key_label, &k, app.db, config,
+                                    ) {
                                         // Evict oldest if at capacity (non-blocking)
                                         if signal_generators.len() >= app::MAX_PLOT_SLOTS {
                                             let mut oldest = signal_generators.remove(0);
@@ -592,10 +594,11 @@ fn run_app(
                                             .last_stream_id
                                             .clone()
                                             .unwrap_or_else(|| "$".to_string());
-                                        let key_url = client.url_for_key(&k).to_string();
-                                        if let Some(sl) =
-                                            StreamListener::start(&key_url, &k, &lid, app.db)
-                                        {
+                                        let key_info = client.info_for_key(&k);
+                                        let key_label = client.host_label_for_key(&k).to_string();
+                                        if let Some(sl) = StreamListener::start(
+                                            key_info, &key_label, &k, &lid, app.db,
+                                        ) {
                                             // Evict oldest if at capacity (non-blocking)
                                             if stream_listeners.len() >= app::MAX_PLOT_SLOTS {
                                                 let mut oldest = stream_listeners.remove(0);
@@ -1630,7 +1633,7 @@ mod tests {
 
     /// Write `content` to a temp file and parse it. Returns the parse result so a
     /// test can assert on either the hosts or the error text.
-    fn parse_hosts_str(content: &str) -> Result<Vec<(String, String)>> {
+    fn parse_hosts_str(content: &str) -> Result<Vec<hosts::HostEntry>> {
         let dir = std::env::temp_dir();
         let path = dir.join(format!(
             "redis-tui-hosts-test-{}-{:?}.txt",
@@ -1650,11 +1653,11 @@ mod tests {
         )
         .expect("valid file should parse");
         assert_eq!(hosts.len(), 2);
-        assert_eq!(hosts[0].1, "redis://127.0.0.1:6379/0");
-        assert_eq!(hosts[1].1, "redis://127.0.0.1:6380/1");
+        assert_eq!(hosts[0].label, "127.0.0.1:6379");
+        assert_eq!(hosts[1].label, "127.0.0.1:6380");
     }
 
-    // Regression: a hosts file entry is pushed to `from_urls` as the original
+    // Regression: a hosts file entry is pushed to `from_entries` as the original
     // string, unparsed. Bare shorthand is valid for `--hosts` (parse_host_entry
     // accepts it) but `redis::Client::open` cannot connect with it, and that
     // failure looks exactly like an unreachable host - it burns the whole
