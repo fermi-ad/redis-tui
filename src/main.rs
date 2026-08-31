@@ -1,5 +1,6 @@
 mod app;
 mod data;
+mod hosts;
 mod redis_client;
 mod ui;
 
@@ -85,13 +86,17 @@ impl Args {
     }
 }
 
-/// Parse a hosts file. Each line is a Redis URL. Lines starting with # are comments.
-/// Blank lines are skipped. Returns (label, url) pairs.
+/// Read a hosts file, one entry per line, `#` for comments.
+///
+/// Temporary: `--hosts-file` is removed in favour of `--hosts` in a later
+/// commit. Until then this keeps working, delegating each line to the shared
+/// entry parser so there is only one grammar. Returns (label, url) pairs.
 fn parse_hosts_file(path: &str) -> Result<Vec<(String, String)>> {
     let content = std::fs::read_to_string(path)
         .with_context(|| format!("Failed to read hosts file: {}", path))?;
 
-    let mut hosts = Vec::new();
+    let defaults = hosts::HostDefaults::default();
+    let mut entries = Vec::new();
     let mut problems: Vec<String> = Vec::new();
 
     for (i, line) in content.lines().enumerate() {
@@ -103,35 +108,10 @@ fn parse_hosts_file(path: &str) -> Result<Vec<(String, String)>> {
             continue;
         }
 
-        // Validate with the same parser `RedisClient::connect` uses, rather than
-        // a hand-rolled check that could drift from what redis-rs accepts. An
-        // entry that fails here can never connect, so it must not reach the
-        // retry loop in `MultiRedisClient::from_urls`.
-        if let Err(e) = redis::Client::open(trimmed) {
-            problems.push(format!(
-                "  line {}: {}\n    {}{}",
-                lineno,
-                trimmed,
-                e,
-                scheme_hint(trimmed)
-            ));
-            continue;
+        match hosts::parse_host_entry(trimmed, &defaults) {
+            Ok(entry) => entries.push((entry.label, trimmed.to_string())),
+            Err(e) => problems.push(format!("  line {}: {}\n    {}", lineno, trimmed, e)),
         }
-
-        // Use the host:port portion as a label, or fallback to line number
-        let label = trimmed
-            .strip_prefix("redis://")
-            .and_then(|s| s.split('/').next())
-            .map(|s| {
-                // Remove auth portion for label
-                if let Some(at_pos) = s.rfind('@') {
-                    s[at_pos + 1..].to_string()
-                } else {
-                    s.to_string()
-                }
-            })
-            .unwrap_or_else(|| format!("host-{}", lineno));
-        hosts.push((label, trimmed.to_string()));
     }
 
     if !problems.is_empty() {
@@ -148,27 +128,11 @@ fn parse_hosts_file(path: &str) -> Result<Vec<(String, String)>> {
         );
     }
 
-    if hosts.is_empty() {
+    if entries.is_empty() {
         anyhow::bail!("Hosts file '{}' contains no valid URLs", path);
     }
 
-    Ok(hosts)
-}
-
-/// Suggest the scheme-prefixed form when an entry looks like a bare `host:port`.
-/// That is the likeliest typo, and the raw redis-rs error for it does not say so.
-fn scheme_hint(entry: &str) -> String {
-    if entry.contains("://") {
-        return String::new();
-    }
-    match entry.split_once(':') {
-        Some((host, port))
-            if !host.is_empty() && !port.is_empty() && port.chars().all(|c| c.is_ascii_digit()) =>
-        {
-            format!(" - did you mean redis://{} ?", entry)
-        }
-        _ => String::new(),
-    }
+    Ok(entries)
 }
 
 fn main() -> Result<()> {
@@ -1689,23 +1653,6 @@ mod tests {
     }
 
     #[test]
-    fn parse_hosts_rejects_bare_host_port_with_a_scheme_hint() {
-        let err = parse_hosts_str("localhost:6379\n").expect_err("bare host:port is not a URL");
-        let msg = err.to_string();
-        assert!(msg.contains("line 1"), "should name the line: {}", msg);
-        assert!(
-            msg.contains("localhost:6379"),
-            "should quote the entry: {}",
-            msg
-        );
-        assert!(
-            msg.contains("redis://localhost:6379"),
-            "should suggest the scheme-prefixed form: {}",
-            msg
-        );
-    }
-
-    #[test]
     fn parse_hosts_rejects_a_url_with_no_host() {
         let err = parse_hosts_str("redis://\n").expect_err("no host is not usable");
         assert!(err.to_string().contains("line 1"), "{}", err);
@@ -1719,18 +1666,27 @@ mod tests {
 
     #[test]
     fn parse_hosts_reports_every_bad_line_not_just_the_first() {
-        let err = parse_hosts_str("localhost:6379\nredis://127.0.0.1:6379\nalso-bad:1\n")
-            .expect_err("two bad lines");
+        let err =
+            parse_hosts_str("localhost:notaport\nredis://127.0.0.1:6379\nalso-bad:notaport\n")
+                .expect_err("two bad lines");
         let msg = err.to_string();
-        assert!(msg.contains("localhost:6379"), "first bad entry: {}", msg);
-        assert!(msg.contains("also-bad:1"), "second bad entry: {}", msg);
+        assert!(
+            msg.contains("localhost:notaport"),
+            "first bad entry: {}",
+            msg
+        );
+        assert!(
+            msg.contains("also-bad:notaport"),
+            "second bad entry: {}",
+            msg
+        );
     }
 
     #[test]
     fn parse_hosts_line_numbers_count_blanks_and_comments() {
         // The bad entry is on physical line 4; blanks and comments above it must
         // not shift the number that gets reported.
-        let err = parse_hosts_str("# comment\n\n\nbad-entry:1\n").expect_err("bad entry");
+        let err = parse_hosts_str("# comment\n\n\nbad-entry:notaport\n").expect_err("bad entry");
         let msg = err.to_string();
         assert!(
             msg.contains("line 4"),
@@ -1743,17 +1699,5 @@ mod tests {
     fn parse_hosts_rejects_a_file_with_no_entries() {
         let err = parse_hosts_str("# only a comment\n\n").expect_err("nothing usable");
         assert!(err.to_string().contains("no valid URLs"), "{}", err);
-    }
-
-    #[test]
-    fn parse_hosts_label_strips_scheme_auth_and_db() {
-        let hosts = parse_hosts_str("redis://:secret@10.0.0.5:6379/2\n").unwrap();
-        assert_eq!(hosts[0].0, "10.0.0.5:6379");
-    }
-
-    #[test]
-    fn parse_hosts_label_for_a_url_without_auth() {
-        let hosts = parse_hosts_str("redis://127.0.0.1:6379/0\n").unwrap();
-        assert_eq!(hosts[0].0, "127.0.0.1:6379");
     }
 }
