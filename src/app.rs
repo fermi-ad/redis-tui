@@ -1567,12 +1567,39 @@ impl App {
 
         match key_type {
             "string" => {
-                let current = match &self.current_value {
-                    Some(RedisValue::String(b)) => String::from_utf8_lossy(b).to_string(),
-                    _ => String::new(),
+                // Never pre-fill through `from_utf8_lossy`. It collapses every
+                // invalid byte sequence into U+FFFD, and `execute_edit` writes
+                // that text straight back with SET, so pressing Enter on an
+                // untouched popup destroyed a binary value (#82). The question
+                // is literally "is this UTF-8", so ask that -- not
+                // `is_binary()`, which only looks for control bytes.
+                let text = match &self.current_value {
+                    Some(RedisValue::String(b)) => std::str::from_utf8(b).ok().map(str::to_string),
+                    // No value loaded: an empty text field is the old behaviour
+                    // and cannot lose anything.
+                    _ => Some(String::new()),
                 };
                 self.edit_operation = Some(EditOperation::SetString);
-                self.edit_fields = vec![("Value".to_string(), current)];
+                match text {
+                    Some(t) => {
+                        self.edit_binary_mode = false;
+                        self.edit_fields = vec![("Value".to_string(), t)];
+                    }
+                    None => {
+                        // Binary: open straight into binary mode with an empty
+                        // field, so the value has to be re-entered deliberately
+                        // as numbers. `encode_values` rejects an empty field, so
+                        // Enter without typing reports an error and writes
+                        // nothing, rather than destroying the key.
+                        self.edit_binary_mode = true;
+                        self.edit_fields = vec![("Value".to_string(), String::new())];
+                        self.status_message = format!(
+                            "'{}' holds non-UTF-8 bytes - type new values as {} (Ctrl+T changes type)",
+                            key,
+                            DataType::all()[self.edit_binary_dtype_idx]
+                        );
+                    }
+                }
             }
             "hash" => {
                 self.edit_operation = Some(EditOperation::HSet);
@@ -2226,6 +2253,104 @@ pub fn compute_fft_magnitude(data: &[f64]) -> Vec<f64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ─── #82: editing a binary string must not destroy it ────
+
+    /// An `App` sitting on one selected string key holding `bytes`.
+    fn app_on_string_key(bytes: &[u8]) -> App {
+        let mut app = App::new();
+        app.keys = vec!["blob:float32_1k".to_string()];
+        app.key_list_state.select(Some(0));
+        app.current_key_info = Some(KeyInfo {
+            name: "blob:float32_1k".to_string(),
+            key_type: "string".to_string(),
+            ttl: -1,
+            size: bytes.len() as i64,
+            encoding: "raw".to_string(),
+        });
+        app.current_value = Some(RedisValue::String(bytes.to_vec()));
+        app
+    }
+
+    /// 1000 little-endian float32 samples, as `start-dev.sh` seeds.
+    fn float32_blob() -> Vec<u8> {
+        (0..1000u32)
+            .flat_map(|i| ((i as f32) * 0.01).sin().to_le_bytes())
+            .collect()
+    }
+
+    // The reported bug: `s` then Enter, typing nothing, rewrote the key through
+    // `String::from_utf8_lossy` and grew a 4000-byte blob to 6847 bytes of
+    // U+FFFD. Nothing lossy may reach the edit field.
+    #[test]
+    fn editing_a_non_utf8_string_does_not_prefill_lossy_text() {
+        let blob = float32_blob();
+        assert!(std::str::from_utf8(&blob).is_err(), "blob must be binary");
+
+        let mut app = app_on_string_key(&blob);
+        app.start_edit();
+
+        assert_eq!(app.edit_fields.len(), 1);
+        let field = &app.edit_fields[0].1;
+        assert!(
+            !field.contains('\u{FFFD}'),
+            "replacement chars reached the edit field: {:?}",
+            field
+        );
+        assert!(
+            field.is_empty(),
+            "field should start empty, got {:?}",
+            field
+        );
+    }
+
+    #[test]
+    fn editing_a_non_utf8_string_opens_in_binary_mode() {
+        let mut app = app_on_string_key(&float32_blob());
+        app.start_edit();
+        assert!(
+            app.edit_binary_mode,
+            "binary mode must be on so the write path encodes bytes"
+        );
+        assert_eq!(app.input_mode, InputMode::Edit);
+    }
+
+    #[test]
+    fn editing_a_non_utf8_string_says_why() {
+        let mut app = app_on_string_key(&float32_blob());
+        app.start_edit();
+        assert!(
+            app.status_message.contains("non-UTF-8"),
+            "user needs to know why the field is empty: {:?}",
+            app.status_message
+        );
+    }
+
+    // The ordinary case must be untouched: text keys still pre-fill as text.
+    #[test]
+    fn editing_a_utf8_string_still_prefills_the_text() {
+        let mut app = app_on_string_key(b"hello world");
+        app.start_edit();
+        assert_eq!(app.edit_fields[0].1, "hello world");
+        assert!(!app.edit_binary_mode);
+    }
+
+    // Binary mode is sticky per-edit, so a text key opened after a binary one
+    // must not inherit it.
+    #[test]
+    fn a_text_key_opened_after_a_binary_one_is_not_left_in_binary_mode() {
+        let mut app = app_on_string_key(&float32_blob());
+        app.start_edit();
+        assert!(app.edit_binary_mode);
+
+        app.cancel_edit();
+        app.current_value = Some(RedisValue::String(b"plain text".to_vec()));
+        app.start_edit();
+        assert!(
+            !app.edit_binary_mode,
+            "binary mode leaked from the previous edit"
+        );
+    }
 
     // ---- #31: plot limit validation rejects non-finite values ----
 
