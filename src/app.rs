@@ -13,6 +13,9 @@ pub const MAX_PLOT_SLOTS: usize = 4;
 /// Only the newest entries are needed for display (last 5 shown)
 /// and plot extraction (last entry's waveform).
 pub const MAX_STREAM_ENTRIES: usize = 10;
+/// Default cap on collection elements fetched per value load. Overridable with
+/// --max-value-items / REDIS_TUI_MAX_VALUE_ITEMS.
+pub const DEFAULT_MAX_VALUE_ITEMS: usize = 1_000;
 
 /// Colors assigned to each plot slot
 pub const PLOT_COLORS: [Color; MAX_PLOT_SLOTS] =
@@ -366,6 +369,11 @@ pub struct App {
     pub new_key_type_idx: usize,      // index into KEY_TYPES for new key creation
     pub edit_binary_mode: bool,       // encode values as binary blobs
     pub edit_binary_dtype_idx: usize, // index into DataType::all() for binary encoding
+    /// Most collection elements fetched per value load (--max-value-items)
+    pub max_value_items: usize,
+    /// True length of the loaded collection, when it is one. Compared against
+    /// what was actually loaded to report how much is hidden.
+    pub value_total_items: Option<usize>,
 
     // Signal generator state
     pub signal_gen_fields: Vec<(String, String)>,
@@ -466,6 +474,8 @@ impl App {
             new_key_type_idx: 0,
             edit_binary_mode: false,
             edit_binary_dtype_idx: 6, // Float32 default
+            max_value_items: DEFAULT_MAX_VALUE_ITEMS,
+            value_total_items: None,
 
             signal_gen_fields: Vec::new(),
             signal_gen_focus: 0,
@@ -835,6 +845,25 @@ impl App {
         }
     }
 
+    /// `(shown, total)` when the loaded collection is larger than what was
+    /// loaded, so the pane can say so. Truncation the user cannot see is the
+    /// same quiet wrongness as showing a mangled value: partial data reads as
+    /// complete.
+    pub fn value_truncation(&self) -> Option<(usize, usize)> {
+        let total = self.value_total_items?;
+        let shown = match self.current_value.as_ref()? {
+            RedisValue::List(v) | RedisValue::Set(v) => v.len(),
+            RedisValue::ZSet(v) => v.len(),
+            RedisValue::Hash(v) => v.len(),
+            _ => return None,
+        };
+        if total > shown {
+            Some((shown, total))
+        } else {
+            None
+        }
+    }
+
     pub fn load_selected_value(&mut self, client: &mut MultiRedisClient) {
         if let Some(idx) = self.key_list_state.selected() {
             if idx < self.keys.len() {
@@ -860,8 +889,10 @@ impl App {
                     }
                 }
 
-                match client.get_value(key) {
-                    Ok(mut value) => {
+                match client.get_value(key, self.max_value_items) {
+                    Ok(loaded) => {
+                        self.value_total_items = loaded.total_items;
+                        let mut value = loaded.value;
                         // Cap stream entries to prevent OOM on large streams
                         cap_stream_entries(&mut value);
                         // Track last stream ID for XREAD polling
@@ -877,6 +908,7 @@ impl App {
                     Err(e) => {
                         self.status_message = format!("Error reading value: {}", e);
                         self.current_value = None;
+                        self.value_total_items = None;
                         self.plot_data.clear();
                         self.last_stream_id = None;
                     }
@@ -2346,6 +2378,42 @@ mod tests {
             !app.edit_binary_mode,
             "binary mode leaked from the previous edit"
         );
+    }
+
+    // ─── #87: truncation must be visible, not silent ─────────
+
+    fn app_with_loaded_list(shown: usize, total: usize) -> App {
+        let mut app = App::new();
+        app.current_value = Some(RedisValue::List(
+            (0..shown)
+                .map(|i| format!("item-{}", i).into_bytes())
+                .collect(),
+        ));
+        app.value_total_items = Some(total);
+        app
+    }
+
+    // Showing 1000 of 5,000,000 without saying so is the same class of quiet
+    // wrongness as #82: the user reads partial data as complete.
+    #[test]
+    fn a_capped_collection_reports_what_is_hidden() {
+        let app = app_with_loaded_list(1000, 5_000_000);
+        assert_eq!(app.value_truncation(), Some((1000, 5_000_000)));
+    }
+
+    #[test]
+    fn a_whole_collection_reports_no_truncation() {
+        let app = app_with_loaded_list(7, 7);
+        assert_eq!(app.value_truncation(), None);
+    }
+
+    // A string has no item count, so nothing may claim it was truncated.
+    #[test]
+    fn a_string_never_reports_truncation() {
+        let mut app = App::new();
+        app.current_value = Some(RedisValue::String(b"hello".to_vec()));
+        app.value_total_items = None;
+        assert_eq!(app.value_truncation(), None);
     }
 
     // ─── #85: multi-byte key names must not panic ────────────

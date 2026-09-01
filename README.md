@@ -90,6 +90,9 @@ redis-tui --hosts redis://:password@host:6379/2
 # Connect to several hosts at once, mixing the forms
 redis-tui --hosts db1 db2:6380 redis://svc:pw@db3/2
 
+# Load more of each large collection (default 1000 elements)
+redis-tui --max-value-items 5000
+
 # Widen the ingestion rate chart to an hour, averaged over 5s
 redis-tui --rate-history 60 --rate-avg-window 5
 

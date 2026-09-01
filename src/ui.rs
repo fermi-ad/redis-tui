@@ -245,6 +245,20 @@ fn draw_value_view(frame: &mut Frame, app: &mut App, area: Rect) {
         )));
     }
 
+    // Say so when the collection was capped. Partial data that looks complete
+    // is worse than slow data.
+    if let Some((shown, total)) = app.value_truncation() {
+        lines.push(Line::from(Span::styled(
+            format!(
+                "Showing first {} of {} — raise --max-value-items to see more",
+                shown, total
+            ),
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        )));
+    }
+
     // Ingestion rate summary — shown for stream keys being actively listened to
     if let Some(key) = app.selected_key_name() {
         let is_stream = app
@@ -1983,6 +1997,45 @@ impl App {
 mod tests {
     use super::*;
     use ratatui::{backend::TestBackend, Terminal};
+
+    // ─── #87: a capped collection must say so ────────────────
+
+    #[test]
+    fn the_value_view_announces_a_capped_collection() {
+        let mut app = App::new();
+        app.current_key_info = Some(crate::redis_client::KeyInfo {
+            name: "big:list".to_string(),
+            key_type: "list".to_string(),
+            ttl: -1,
+            size: 4096,
+            encoding: "quicklist".to_string(),
+        });
+        app.current_value = Some(crate::redis_client::RedisValue::List(
+            (0..5).map(|i| format!("item-{}", i).into_bytes()).collect(),
+        ));
+        app.value_total_items = Some(5000);
+
+        let backend = TestBackend::new(90, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| draw_value_view(frame, &mut app, Rect::new(0, 0, 90, 24)))
+            .unwrap();
+
+        let buf = terminal.backend().buffer().clone();
+        let text: String = (0..24)
+            .map(|y| {
+                (0..90)
+                    .map(|x| buf.cell((x, y)).unwrap().symbol().to_string())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            text.contains("Showing first 5 of 5000"),
+            "the pane must say what is hidden:\n{}",
+            text
+        );
+    }
 
     // ─── #85: multi-byte key names must not panic ────────────
 

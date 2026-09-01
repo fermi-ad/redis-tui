@@ -70,6 +70,12 @@ struct Args {
           value_parser = clap::value_parser!(u64).range(1..))]
     rate_avg_window: u64,
 
+    /// Most collection elements fetched per value load. Guards against a
+    /// single large list or hash stalling the UI.
+    #[arg(long, default_value_t = app::DEFAULT_MAX_VALUE_ITEMS as u64, env = "REDIS_TUI_MAX_VALUE_ITEMS",
+          value_parser = clap::value_parser!(u64).range(1..))]
+    max_value_items: u64,
+
     /// Retry attempts for a host that is not up yet
     #[arg(long, default_value_t = 5, env = "REDIS_TUI_CONNECT_RETRIES",
           value_parser = clap::value_parser!(u32).range(0..))]
@@ -132,6 +138,7 @@ fn main() -> Result<()> {
         &mut client,
         args.rate_history * 60,
         args.rate_avg_window,
+        args.max_value_items as usize,
     );
 
     // Restore terminal
@@ -301,12 +308,14 @@ fn run_app(
     client: &mut MultiRedisClient,
     rate_history_secs: u64,
     rate_avg_window_secs: u64,
+    max_value_items: usize,
 ) -> Result<()> {
     let mut app = App::new();
     app.db = client.db;
     app.host_count = client.host_count();
     app.rate_history_secs = rate_history_secs;
     app.rate_avg_window_secs = rate_avg_window_secs;
+    app.max_value_items = max_value_items;
 
     // Initial key load
     app.refresh_keys(client);
@@ -489,8 +498,10 @@ fn run_app(
                                     let added = app.toggle_plot_slot(&k);
                                     if added {
                                         // Fetch value directly from Redis for this key
-                                        if let Ok(value) = client.get_value(&k) {
-                                            app.update_slot_data(&k, &value);
+                                        if let Ok(loaded) =
+                                            client.get_value(&k, app.max_value_items)
+                                        {
+                                            app.update_slot_data(&k, &loaded.value);
                                         }
                                         app.plot_visible = true;
                                         app.status_message = format!(
@@ -1659,7 +1670,17 @@ mod tests {
     }
 
     #[test]
+    fn max_value_items_defaults_and_accepts_an_override() {
+        let a = Args::try_parse_from(["redis-tui"]).unwrap();
+        assert_eq!(a.max_value_items, app::DEFAULT_MAX_VALUE_ITEMS as u64);
+        let a = Args::try_parse_from(["redis-tui", "--max-value-items", "50"]).unwrap();
+        assert_eq!(a.max_value_items, 50);
+    }
+
+    #[test]
     fn numeric_ranges_are_still_enforced() {
+        // Zero would load nothing at all, which reads as an empty key.
+        assert!(Args::try_parse_from(["redis-tui", "--max-value-items", "0"]).is_err());
         assert!(Args::try_parse_from(["redis-tui", "--connect-timeout", "0"]).is_err());
         assert!(Args::try_parse_from(["redis-tui", "--rate-history", "0"]).is_err());
         assert!(Args::try_parse_from(["redis-tui", "--rate-avg-window", "0"]).is_err());
@@ -1675,6 +1696,7 @@ mod tests {
             "REDIS_TUI_DB",
             "REDIS_TUI_RATE_HISTORY",
             "REDIS_TUI_RATE_AVG_WINDOW",
+            "REDIS_TUI_MAX_VALUE_ITEMS",
             "REDIS_TUI_CONNECT_RETRIES",
             "REDIS_TUI_CONNECT_TIMEOUT",
         ] {
