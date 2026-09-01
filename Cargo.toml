@@ -1,6 +1,6 @@
 [package]
 name = "redis-tui"
-version = "2.0.1"
+version = "2.0.2"
 edition = "2021"
 description = "A Redis TUI client inspired by Redis Insight"
 license = "BSD-3-Clause"

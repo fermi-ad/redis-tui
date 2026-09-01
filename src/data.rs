@@ -308,9 +308,60 @@ pub fn is_binary(bytes: &[u8]) -> bool {
         .any(|&b| b < 0x20 && b != b'\n' && b != b'\r' && b != b'\t')
 }
 
+/// Truncate to at most `max_chars` characters, appending "..." if shortened.
+///
+/// `str::len()` is a byte count but `str` indexing requires a char boundary, so
+/// the old `if name.len() > N { &name[..N] }` pattern panicked on any name whose
+/// byte N landed inside a multi-byte character (#85). Testing and cutting in one
+/// operation removes the mismatch, so the bug cannot come back by copying the
+/// pattern to a fifth site.
+///
+/// `max_chars` counts characters, not terminal columns: 12 CJK characters still
+/// occupy roughly 24 columns.
+pub fn truncate_key_name(name: &str, max_chars: usize) -> String {
+    match name.char_indices().nth(max_chars) {
+        Some((byte_idx, _)) => format!("{}...", &name[..byte_idx]),
+        None => name.to_string(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ─── #85: char-safe truncation ───────────────────────────
+
+    #[test]
+    fn a_short_name_is_returned_unchanged() {
+        assert_eq!(truncate_key_name("temp", 10), "temp");
+    }
+
+    #[test]
+    fn a_name_of_exactly_the_limit_is_not_elided() {
+        assert_eq!(truncate_key_name("0123456789", 10), "0123456789");
+    }
+
+    #[test]
+    fn a_long_ascii_name_is_elided() {
+        assert_eq!(truncate_key_name("0123456789abc", 10), "0123456789...");
+    }
+
+    // The regression: byte 10 of this name is inside 'ン', so `&name[..10]`
+    // panicked. Cutting at a character index cannot split a character.
+    #[test]
+    fn a_long_multi_byte_name_is_cut_on_a_character_boundary() {
+        assert_eq!(
+            truncate_key_name("温度センサー_データ", 10),
+            "温度センサー_データ"
+        );
+        assert_eq!(truncate_key_name("温度センサー_データ", 5), "温度センサ...");
+    }
+
+    #[test]
+    fn counts_characters_not_bytes() {
+        // Six characters, eighteen bytes: under a six-character limit it stays.
+        assert_eq!(truncate_key_name("温度センサー", 6), "温度センサー");
+    }
 
     // ---- decode_blob: normal decoding ----
 

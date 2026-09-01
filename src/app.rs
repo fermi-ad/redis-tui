@@ -1319,11 +1319,7 @@ impl App {
                 let y_max = slot
                     .y_max
                     .unwrap_or(if auto_max.is_finite() { auto_max } else { 1.0 });
-                let short_name = if slot.key_name.len() > 10 {
-                    format!("{}...", &slot.key_name[..10])
-                } else {
-                    slot.key_name.clone()
-                };
+                let short_name = crate::data::truncate_key_name(&slot.key_name, 10);
                 fields.push((format!("{} Y Min", short_name), format!("{:.2}", y_min)));
                 fields.push((format!("{} Y Max", short_name), format!("{:.2}", y_max)));
             }
@@ -2350,6 +2346,60 @@ mod tests {
             !app.edit_binary_mode,
             "binary mode leaked from the previous edit"
         );
+    }
+
+    // ─── #85: multi-byte key names must not panic ────────────
+
+    // `str::len()` is bytes but `str` indexing needs a char boundary, so
+    // `&name[..10]` on a name whose byte 10 lands mid-character panics. These
+    // names are supported input: scan_keys drops only keys that fail UTF-8
+    // decoding, so Japanese and Cyrillic names reach the plot slots intact.
+    #[test]
+    fn plot_settings_survives_a_multi_byte_key_name() {
+        let mut app = App::new();
+        app.toggle_plot_slot("温度センサー");
+        app.plot_slots[0].data = vec![1.0, 2.0, 3.0];
+
+        app.start_plot_settings();
+
+        let labels: Vec<&str> = app.edit_fields.iter().map(|(l, _)| l.as_str()).collect();
+        assert!(
+            labels.iter().any(|l| l.contains("温度")),
+            "the slot's Y limit fields should be labelled with its name: {:?}",
+            labels
+        );
+    }
+
+    // The issue's cheapest repro: `p` then `x` on a key with no plottable data.
+    #[test]
+    fn plot_settings_survives_a_multi_byte_key_name_with_no_data() {
+        let mut app = App::new();
+        app.toggle_plot_slot("温度センサー");
+        app.start_plot_settings();
+    }
+
+    #[test]
+    fn a_long_multi_byte_name_is_shortened_without_splitting_a_character() {
+        let mut app = App::new();
+        app.toggle_plot_slot("温度センサー_ストリーム_データ");
+        app.plot_slots[0].data = vec![1.0];
+
+        app.start_plot_settings();
+
+        // X Min/X Max come first; the per-slot Y limits follow.
+        let label = app
+            .edit_fields
+            .iter()
+            .map(|(l, _)| l.as_str())
+            .find(|l| l.contains("温度"))
+            .expect("the slot should contribute a labelled field");
+        assert!(
+            label.contains("..."),
+            "long name should be elided: {}",
+            label
+        );
+        // Every char must have survived intact -- no replacement or panic.
+        assert!(label.starts_with("温度センサー"), "got {}", label);
     }
 
     // ---- #31: plot limit validation rejects non-finite values ----

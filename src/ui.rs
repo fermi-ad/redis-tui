@@ -813,11 +813,7 @@ fn draw_signal_chart(
                 let mut parts = vec![format!(" x:{:.0}", hx)];
                 for slot in &app.plot_slots {
                     if let Some(&val) = slot.data.get(x_idx) {
-                        let short = if slot.key_name.len() > 8 {
-                            format!("{}...", &slot.key_name[..8])
-                        } else {
-                            slot.key_name.clone()
-                        };
+                        let short = crate::data::truncate_key_name(&slot.key_name, 8);
                         parts.push(format!("{}:{:.2}", short, val));
                     }
                 }
@@ -854,11 +850,7 @@ fn draw_signal_chart(
             if !slot.data.is_empty() {
                 let sr = &slot_renders[i];
                 // Truncate key name to keep legend compact
-                let short_name = if slot.key_name.len() > 12 {
-                    format!("{}...", &slot.key_name[..12])
-                } else {
-                    slot.key_name.clone()
-                };
+                let short_name = crate::data::truncate_key_name(&slot.key_name, 12);
                 let legend_name = format!(
                     "{} {} [{:.0}..{:.0}]",
                     short_name, slot.data_type, sr.y_min, sr.y_max
@@ -1091,11 +1083,7 @@ fn draw_fft_chart(frame: &mut Frame, app: &mut App, area: Rect, _border_color: C
     } else {
         for (i, slot) in app.plot_slots.iter().enumerate() {
             if i < slot_fft_points.len() && !slot_fft_points[i].is_empty() {
-                let short_name = if slot.key_name.len() > 12 {
-                    format!("{}...", &slot.key_name[..12])
-                } else {
-                    slot.key_name.clone()
-                };
+                let short_name = crate::data::truncate_key_name(&slot.key_name, 12);
                 datasets.push(
                     Dataset::default()
                         .name(short_name)
@@ -1995,6 +1983,55 @@ impl App {
 mod tests {
     use super::*;
     use ratatui::{backend::TestBackend, Terminal};
+
+    // ─── #85: multi-byte key names must not panic ────────────
+
+    /// A slot named with 3-byte characters, chosen so byte 8 (the hover label
+    /// cut) and byte 12 (the legend cut) both land inside a character.
+    const MULTI_BYTE_KEY: &str = "テスト_ストリーム";
+
+    fn app_with_multi_byte_slot() -> App {
+        let mut app = App::new();
+        app.toggle_plot_slot(MULTI_BYTE_KEY);
+        app.plot_slots[0].data = (0..64).map(|i| (i as f64 * 0.1).sin()).collect();
+        app
+    }
+
+    // Covers both cuts in draw_signal_chart: the hover readout (>8) and the
+    // legend entry (>12). Three of the four sites run inside terminal.draw on
+    // the 50ms tick, so a panic here kills the process on the next frame.
+    #[test]
+    fn signal_chart_renders_a_multi_byte_key_name() {
+        let mut app = app_with_multi_byte_slot();
+        app.hover_data_x = Some(3.0);
+        app.hover_data_y = Some(0.5);
+
+        let backend = TestBackend::new(80, 20);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| {
+                let area = Rect::new(0, 0, 80, 20);
+                draw_signal_chart(frame, &mut app, area, " Signal ", Color::Cyan);
+            })
+            .unwrap();
+    }
+
+    // draw_fft_chart is only reachable after draw_signal_chart in the real
+    // layout, so it is called directly or the third site stays uncovered.
+    #[test]
+    fn fft_chart_renders_a_multi_byte_key_name() {
+        let mut app = app_with_multi_byte_slot();
+        app.fft_enabled = true;
+
+        let backend = TestBackend::new(80, 20);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| {
+                let area = Rect::new(0, 0, 80, 20);
+                draw_fft_chart(frame, &mut app, area, Color::Cyan);
+            })
+            .unwrap();
+    }
 
     #[test]
     fn title_bar_contains_version() {
