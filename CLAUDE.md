@@ -30,12 +30,13 @@ docker run -it --rm --network host redis-tui
 
 ## Architecture
 
-Four source modules in `src/`, single binary:
+Five source modules in `src/`, single binary:
 
 - **`main.rs`** — CLI parsing, terminal setup/teardown (raw mode, mouse capture, bracketed paste), event loop (50ms tick), background thread lifecycle (`StreamListener`, `SignalGenerator`), input routing by `InputMode`, mouse event handling (click-to-select, scroll per-pane, shift-bypass)
 - **`app.rs`** — All application state (`App` struct), Redis data loading, plot/FFT computation, edit operations, multi-key slot management with per-key data types, ingestion rate tracking (`RateTracker`)
 - **`data.rs`** — Binary data encoding/decoding (`DataType` × `Endianness` → `Vec<f64>`), hex formatting, value parsing. `is_binary()` only checks for control chars — do NOT use it to gate binary display for `_`-prefixed stream fields or when a numeric DataType is selected
-- **`redis_client.rs`** — `RedisClient` (single host) and `MultiRedisClient` (aggregated multi-host with collision detection), all Redis commands
+- **`hosts.rs`** — Turns each `--hosts` entry (`host`, `host:port`, or a full `redis://` URL) into a `redis::ConnectionInfo` plus a credential-free display label. Reports every bad entry at once
+- **`redis_client.rs`** — `RedisClient` (one host, carrying its `ConnectionInfo` and label) and `MultiRedisClient` (aggregated multi-host with collision detection), all Redis commands
 - **`ui.rs`** — ratatui rendering: layout (key list / value view / data plot), charts (signal + FFT + ingestion rate), popups (filter, edit, help, confirm, signal gen, plot settings), crosshair drawing, per-key Y-axis labels and hover values
 
 ### Data Flow
@@ -145,3 +146,4 @@ There is no `tests/` directory: this is a binary-only crate with no lib target, 
 - Never include Co-Authored-By lines in commits
 - Confirmation popups carry their target in `ConfirmAction`; never re-read the live selection when the user answers, since mouse input is not gated by `InputMode`
 - `apply_plot_settings()` handles all field counts (X limits + per-slot Y limits) — no field count checks
+- One flag names where to connect. Connection info is built as `redis::ConnectionInfo`, never by formatting a URL string — a credential interpolated into a URL breaks on `/ # ? @`

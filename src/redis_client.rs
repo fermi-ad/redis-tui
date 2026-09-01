@@ -1,5 +1,5 @@
 use anyhow::{Context, Result};
-use redis::{Commands, ConnectionLike};
+use redis::{Commands, ConnectionLike, IntoConnectionInfo};
 use std::collections::HashMap;
 
 /// Information about a Redis key
@@ -31,44 +31,12 @@ pub enum RedisValue {
     Unknown(String),
 }
 
-#[allow(dead_code)]
 pub struct RedisClient {
     connection: redis::Connection,
-    pub url: String,
+    info: redis::ConnectionInfo,
+    /// `host:port`. Display only, and never contains credentials.
+    pub label: String,
     pub db: i64,
-}
-
-/// Extract the database number from a Redis URL, e.g. `redis://host:6379/3` -> 3.
-///
-/// Returns 0 when the URL carries no usable database component. Query strings and
-/// fragments are stripped first, so `redis://host/3?timeout=5` yields 3 rather than
-/// silently falling back to 0, and a trailing slash (`redis://host/3/`) is tolerated.
-/// Socket timeout used by `RedisClient::connect`. Multi-host startup overrides
-/// this via `connect_with_timeout` so its retry budget stays bounded.
-const DEFAULT_CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
-
-fn parse_db_from_url(url: &str) -> i64 {
-    // Strip `?query` and `#fragment` before looking at the path.
-    let trimmed = url.split(['?', '#']).next().unwrap_or(url);
-
-    // Skip past `scheme://` so the authority's own separators aren't read as a path.
-    let after_scheme = match trimmed.find("://") {
-        Some(i) => &trimmed[i + 3..],
-        None => trimmed,
-    };
-
-    // The path begins at the first '/' after the authority. No '/' means no db given.
-    let Some((_, path)) = after_scheme.split_once('/') else {
-        return 0;
-    };
-
-    // Take the last *non-empty* segment: a trailing slash ("/3/") would otherwise
-    // yield an empty final segment and look like no db was given at all.
-    path.rsplit('/')
-        .find(|segment| !segment.is_empty())
-        .and_then(|s| s.parse::<i64>().ok())
-        .filter(|db| *db >= 0)
-        .unwrap_or(0)
 }
 
 /// Validate a TTL before any command is sent to Redis.
@@ -92,28 +60,55 @@ fn validate_ttl(ttl: i64, key: &str) -> Result<()> {
 }
 
 impl RedisClient {
+    /// Connect using a URL. Retained for the unit tests here and the
+    /// `#[ignore]`d live tests, which have a URL and no defaults to apply.
+    ///
+    /// Nothing in the production binary calls this any more: `StreamListener`
+    /// and `SignalGenerator` take a `ConnectionInfo` directly and go through
+    /// `connect_with_info`, each with a hardcoded 10s timeout rather than the
+    /// user's `--connect-timeout` - threading that through is a separate
+    /// change (#44) alongside the socket *read* timeout, which is out of
+    /// scope here too. So rustc sees this as dead code in a plain
+    /// `cargo build`; it is exercised by `cargo test`.
+    #[allow(dead_code)]
     pub fn connect(url: &str) -> Result<Self> {
-        Self::connect_with_timeout(url, DEFAULT_CONNECT_TIMEOUT)
+        let info = url
+            .into_connection_info()
+            .with_context(|| format!("Failed to parse Redis URL {}", url))?;
+        let label = match info.addr() {
+            redis::ConnectionAddr::Tcp(h, p) => format!("{}:{}", h, p),
+            _ => url.to_string(),
+        };
+        Self::connect_with_info(info, &label, std::time::Duration::from_secs(10))
     }
 
-    /// Connect with an explicit socket timeout. `from_urls` uses this so the
-    /// startup retry budget is actually bounded: with the fixed 10s timeout, a
-    /// host that black-holes packets cost 10s per attempt on top of the sleep.
-    pub fn connect_with_timeout(url: &str, timeout: std::time::Duration) -> Result<Self> {
-        let client = redis::Client::open(url)
-            .with_context(|| format!("Failed to create Redis client for {}", url))?;
+    /// Connect with an explicit socket timeout, so the startup retry budget is
+    /// actually bounded: a host that black-holes packets costs one timeout per
+    /// attempt on top of the sleep.
+    pub fn connect_with_info(
+        info: redis::ConnectionInfo,
+        label: &str,
+        timeout: std::time::Duration,
+    ) -> Result<Self> {
+        let db = info.redis_settings().db();
+        let client = redis::Client::open(info.clone())
+            .with_context(|| format!("Failed to create Redis client for {}", label))?;
         let connection = client
             .get_connection_with_timeout(timeout)
-            .with_context(|| format!("Failed to connect to {}", url))?;
-
-        // Parse db number from URL (e.g., redis://host:port/3)
-        let db = parse_db_from_url(url);
+            .with_context(|| format!("Failed to connect to {}", label))?;
 
         Ok(Self {
             connection,
-            url: url.to_string(),
+            info,
+            label: label.to_string(),
             db,
         })
+    }
+
+    /// The parsed connection info this client was built from, for a
+    /// background thread to open its own connection with.
+    pub fn connection_info(&self) -> redis::ConnectionInfo {
+        self.info.clone()
     }
 
     pub fn select_db(&mut self, db: i64) -> Result<()> {
@@ -549,51 +544,36 @@ pub struct MultiRedisClient {
 }
 
 impl MultiRedisClient {
-    /// Create from a single URL (backwards-compatible).
-    pub fn from_single(url: &str) -> Result<Self> {
-        let client = RedisClient::connect(url)?;
-        let db = client.db;
-        Ok(Self {
-            labels: vec![url.to_string()],
-            clients: vec![client],
-            key_owner: HashMap::new(),
-            collisions: Vec::new(),
-            db,
-        })
-    }
-
-    /// Create from multiple URLs, retrying hosts that aren't up yet.
+    /// Connect to every entry, retrying the ones that are not up yet.
     ///
-    /// `max_retries` and `connect_timeout` are caller-supplied so startup cannot
-    /// stall indefinitely. Entries here are already known to be well-formed -
-    /// `parse_hosts_file` rejects unparseable URLs before this is reached - so
-    /// every retry is against a host that could plausibly come up.
-    pub fn from_urls(
-        urls: &[(String, String)],
+    /// `max_retries` and `connect_timeout` are caller-supplied so startup
+    /// cannot stall indefinitely. Entries are already known to be well-formed:
+    /// `hosts::parse_host_entry` rejects unparseable ones before this is
+    /// reached, so every retry is against a host that could plausibly come up.
+    pub fn from_entries(
+        entries: &[crate::hosts::HostEntry],
         max_retries: u32,
         connect_timeout: std::time::Duration,
     ) -> Result<Self> {
-        let mut clients = Vec::new();
-        let mut labels = Vec::new();
-        let retry_delay = std::time::Duration::from_secs(2);
+        let mut clients: Vec<Option<RedisClient>> = Vec::new();
+        let mut labels: Vec<String> = Vec::new();
 
         // First pass: try to connect to all hosts, track failures
-        let mut pending: Vec<(usize, String, String)> = Vec::new();
-        for (i, (label, url)) in urls.iter().enumerate() {
-            match RedisClient::connect_with_timeout(url, connect_timeout) {
-                Ok(client) => {
-                    clients.push(Some(client));
-                    labels.push(label.clone());
-                }
+        let mut pending: Vec<usize> = Vec::new();
+        for (i, entry) in entries.iter().enumerate() {
+            labels.push(entry.label.clone());
+            match RedisClient::connect_with_info(entry.info.clone(), &entry.label, connect_timeout)
+            {
+                Ok(client) => clients.push(Some(client)),
                 Err(_) => {
                     clients.push(None);
-                    labels.push(label.clone());
-                    pending.push((i, label.clone(), url.clone()));
+                    pending.push(i);
                 }
             }
         }
 
         // Retry failed connections
+        let retry_delay = std::time::Duration::from_secs(2);
         let mut attempt: u32 = 0;
         while !pending.is_empty() && attempt < max_retries {
             attempt += 1;
@@ -605,11 +585,15 @@ impl MultiRedisClient {
             );
             std::thread::sleep(retry_delay);
 
-            pending.retain(|(i, label, url)| {
-                match RedisClient::connect_with_timeout(url, connect_timeout) {
+            pending.retain(|&i| {
+                match RedisClient::connect_with_info(
+                    entries[i].info.clone(),
+                    &entries[i].label,
+                    connect_timeout,
+                ) {
                     Ok(client) => {
-                        eprintln!("  Connected to {}", label);
-                        clients[*i] = Some(client);
+                        eprintln!("  Connected to {}", entries[i].label);
+                        clients[i] = Some(client);
                         false // remove from pending
                     }
                     Err(_) => true, // keep retrying
@@ -623,8 +607,12 @@ impl MultiRedisClient {
         let mut failed = Vec::new();
         for (i, opt) in clients.into_iter().enumerate() {
             if let Some(client) = opt {
+                // Read from the client itself rather than the `labels` array
+                // tracked above - the two always agree (both trace back to
+                // `entries[i].label`), but this way there is one source of
+                // truth instead of two copies that merely happen to match.
+                final_labels.push(client.label.clone());
                 final_clients.push(client);
-                final_labels.push(labels[i].clone());
             } else {
                 failed.push(labels[i].clone());
             }
@@ -642,15 +630,19 @@ impl MultiRedisClient {
         }
 
         if final_clients.is_empty() {
-            anyhow::bail!("Failed to connect to any Redis host");
+            anyhow::bail!(
+                "Could not connect to any of the {} host(s) given",
+                entries.len()
+            );
         }
 
+        let db = final_clients[0].db;
         Ok(Self {
             clients: final_clients,
             labels: final_labels,
             key_owner: HashMap::new(),
             collisions: Vec::new(),
-            db: 0,
+            db,
         })
     }
 
@@ -823,16 +815,11 @@ impl MultiRedisClient {
         self.client_for_key(old_key).rename_key(old_key, new_key)
     }
 
-    /// Get the first URL (used for stream listener/signal generator connections).
-    #[allow(dead_code)]
-    pub fn first_url(&self) -> &str {
-        &self.clients[0].url
-    }
-
-    /// Get the URL for the host that owns a key.
-    pub fn url_for_key(&self, key: &str) -> &str {
+    /// Connection info for the host owning `key`, for a background thread to
+    /// open its own connection with.
+    pub fn info_for_key(&self, key: &str) -> redis::ConnectionInfo {
         let idx = self.host_index_for_key(key);
-        &self.clients[idx].url
+        self.clients[idx].connection_info()
     }
 
     pub fn host_count(&self) -> usize {
@@ -1026,6 +1013,19 @@ mod tests {
             .unwrap()
     }
 
+    /// A single-host `MultiRedisClient` for tests that just need a live
+    /// connection, not any particular entry defaults or retry behaviour.
+    fn connect_multi(url: &str) -> MultiRedisClient {
+        let entry =
+            crate::hosts::parse_host_entry(url, &crate::hosts::HostDefaults::default()).unwrap();
+        MultiRedisClient::from_entries(
+            std::slice::from_ref(&entry),
+            0,
+            std::time::Duration::from_secs(3),
+        )
+        .unwrap()
+    }
+
     #[test]
     #[ignore = "requires redis-server; run with: cargo test -- --ignored"]
     fn reported_db_matches_actual_db_with_query_string() {
@@ -1069,7 +1069,7 @@ mod tests {
         set_key(&mut seed, "beta", "keep-me-too");
         drop(seed);
 
-        let mut multi = MultiRedisClient::from_single(&server.url()).unwrap();
+        let mut multi = connect_multi(&server.url());
         let mut app = crate::app::App::new();
         app.refresh_keys(&mut multi);
         assert_eq!(app.keys, vec!["alpha".to_string(), "beta".to_string()]);
@@ -1131,7 +1131,7 @@ mod tests {
         set_key(&mut seed, "aaa", "value-of-aaa");
         drop(seed);
 
-        let mut multi = MultiRedisClient::from_single(&url).unwrap();
+        let mut multi = connect_multi(&url);
         let mut app = crate::app::App::new();
         app.refresh_keys(&mut multi);
         app.key_list_state.select(Some(0));
@@ -1172,7 +1172,7 @@ mod tests {
         let mut seed = RedisClient::connect(&server.url()).unwrap();
         set_key(&mut seed, "aaa", "value-of-aaa");
 
-        let mut multi = MultiRedisClient::from_single(&server.url()).unwrap();
+        let mut multi = connect_multi(&server.url());
         let mut app = crate::app::App::new();
         app.refresh_keys(&mut multi);
         app.key_list_state.select(Some(0));
@@ -1214,7 +1214,7 @@ mod tests {
             .unwrap();
         drop(seed);
 
-        let mut multi = MultiRedisClient::from_single(&server.url()).unwrap();
+        let mut multi = connect_multi(&server.url());
         let mut app = crate::app::App::new();
         app.refresh_keys(&mut multi);
 
@@ -1314,77 +1314,28 @@ mod tests {
         assert!(ttl > 0 && ttl <= 120, "expected a live ttl, got {}", ttl);
     }
 
-    // ---- #9: DB number parsing from URL ----
-
-    #[test]
-    fn db_parses_from_plain_path() {
-        assert_eq!(parse_db_from_url("redis://127.0.0.1:6379/3"), 3);
-    }
-
-    #[test]
-    fn db_parses_with_query_string() {
-        // The original bug: rsplit('/') yields "3?timeout=5", which fails to parse.
-        assert_eq!(parse_db_from_url("redis://127.0.0.1:6379/3?timeout=5"), 3);
-    }
-
-    #[test]
-    fn db_parses_with_fragment() {
-        assert_eq!(parse_db_from_url("redis://127.0.0.1:6379/7#frag"), 7);
-    }
-
-    #[test]
-    fn db_defaults_to_zero_without_path() {
-        // No path component at all - must be 0 deliberately, not by parse failure.
-        assert_eq!(parse_db_from_url("redis://127.0.0.1:6379"), 0);
-    }
-
-    #[test]
-    fn db_defaults_to_zero_for_non_numeric_path() {
-        assert_eq!(parse_db_from_url("redis://127.0.0.1:6379/notanumber"), 0);
-    }
-
-    #[test]
-    fn db_parses_with_auth_in_url() {
-        assert_eq!(parse_db_from_url("redis://user:pw@127.0.0.1:6379/5"), 5);
-    }
-
-    #[test]
-    fn db_parses_with_trailing_slash() {
-        // rsplit('/') on "3/" yields an empty final segment, which must not be
-        // mistaken for "no db given".
-        assert_eq!(parse_db_from_url("redis://127.0.0.1:6379/3/"), 3);
-    }
-
-    #[test]
-    fn db_parses_with_query_string_after_trailing_slash() {
-        assert_eq!(parse_db_from_url("redis://127.0.0.1:6379/3/?timeout=5"), 3);
-    }
-
-    #[test]
-    fn db_rejects_negative_number() {
-        // A negative DB is nonsense and would only fail later at SELECT.
-        assert_eq!(parse_db_from_url("redis://127.0.0.1:6379/-1"), 0);
-    }
-
-    #[test]
-    fn db_parses_with_empty_path() {
-        assert_eq!(parse_db_from_url("redis://127.0.0.1:6379/"), 0);
-    }
-
     /// A host that is well-formed but not listening must not hold startup for the
     /// old 15 x (10s connect + 2s sleep) budget. Uses a port the OS just handed
     /// back and released, so the connection is refused immediately and what this
     /// measures is the retry budget rather than network latency.
     #[test]
-    fn from_urls_gives_up_on_an_unreachable_host_quickly() {
+    fn from_entries_gives_up_on_an_unreachable_host_quickly() {
         let port = match free_port() {
             Some(p) => p,
             None => return,
         };
-        let urls = vec![("dead".to_string(), format!("redis://127.0.0.1:{}", port))];
+        let entry = crate::hosts::parse_host_entry(
+            &format!("127.0.0.1:{}", port),
+            &crate::hosts::HostDefaults::default(),
+        )
+        .unwrap();
 
         let start = std::time::Instant::now();
-        let result = MultiRedisClient::from_urls(&urls, 2, std::time::Duration::from_secs(1));
+        let result = MultiRedisClient::from_entries(
+            std::slice::from_ref(&entry),
+            2,
+            std::time::Duration::from_secs(1),
+        );
         let elapsed = start.elapsed();
 
         assert!(
@@ -1396,5 +1347,67 @@ mod tests {
             "gave up after {:?}; the retry budget is not being honoured",
             elapsed
         );
+    }
+
+    /// #42: a password containing URL metacharacters must actually authenticate.
+    /// Building a URL string mangled these; ConnectionInfo carries them verbatim.
+    #[test]
+    #[ignore = "requires redis-server; run with: cargo test -- --ignored"]
+    fn connects_with_a_password_containing_url_metacharacters() {
+        let server = TestRedis::start();
+        let password = "p/a:s#s?w@rd";
+
+        let mut admin = RedisClient::connect(&server.url()).unwrap();
+        redis::cmd("CONFIG")
+            .arg("SET")
+            .arg("requirepass")
+            .arg(password)
+            .exec(&mut admin.connection)
+            .unwrap();
+        drop(admin);
+
+        let defaults = crate::hosts::HostDefaults {
+            username: None,
+            password: Some(password.to_string()),
+            db: 0,
+        };
+        let entry =
+            crate::hosts::parse_host_entry(&format!("127.0.0.1:{}", server.port), &defaults)
+                .unwrap();
+
+        let mut client = RedisClient::connect_with_info(
+            entry.info,
+            &entry.label,
+            std::time::Duration::from_secs(3),
+        )
+        .expect("a password with / : # ? @ in it must authenticate");
+
+        let pong: String = redis::cmd("PING").query(&mut client.connection).unwrap();
+        assert_eq!(pong, "PONG");
+    }
+
+    /// The db comes from the parsed connection info, not from re-parsing a URL.
+    #[test]
+    #[ignore = "requires redis-server; run with: cargo test -- --ignored"]
+    fn from_entries_reports_the_db_from_the_entry() {
+        let server = TestRedis::start();
+        let defaults = crate::hosts::HostDefaults {
+            username: None,
+            password: None,
+            db: 3,
+        };
+        let entry =
+            crate::hosts::parse_host_entry(&format!("127.0.0.1:{}", server.port), &defaults)
+                .unwrap();
+
+        let multi = MultiRedisClient::from_entries(
+            std::slice::from_ref(&entry),
+            0,
+            std::time::Duration::from_secs(3),
+        )
+        .unwrap();
+
+        assert_eq!(multi.db, 3);
+        assert_eq!(multi.host_count(), 1);
     }
 }

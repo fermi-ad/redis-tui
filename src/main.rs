@@ -1,5 +1,6 @@
 mod app;
 mod data;
+mod hosts;
 mod redis_client;
 mod ui;
 
@@ -30,164 +31,71 @@ use std::time::Duration;
     about = "A Redis TUI client inspired by Redis Insight"
 )]
 struct Args {
-    /// Redis host
-    #[arg(long, default_value = "127.0.0.1")]
-    host: String,
+    /// Redis hosts: `host`, `host:port`, or a full `redis://` URL.
+    /// Repeatable, and several may be given at once.
+    // `--host` is an alias, not a doc line: a 1.x command naming a single host
+    // keeps working, but advertising it in --help would undercut the point of
+    // there being one flag. `--port` is gone, so the alias only covers hosts on
+    // the default port, or the `host:port` form.
+    #[arg(
+        long,
+        alias = "host",
+        num_args = 1..,
+        action = clap::ArgAction::Append,
+        value_delimiter = ' ',
+        default_value = "127.0.0.1:6379",
+        env = "REDIS_TUI_HOSTS"
+    )]
+    hosts: Vec<String>,
 
-    /// Redis port
-    #[arg(short, long, default_value_t = 6379)]
-    port: u16,
+    /// Username for hosts that do not carry their own
+    #[arg(long, env = "REDIS_TUI_USERNAME")]
+    username: Option<String>,
 
-    /// Redis password
-    #[arg(long)]
+    /// Password for hosts that do not carry their own
+    #[arg(long, env = "REDIS_TUI_PASSWORD")]
     password: Option<String>,
 
-    /// Redis database number
-    #[arg(short, long, default_value_t = 0)]
+    /// Database number for hosts that do not carry their own
+    #[arg(short, long, default_value_t = 0, env = "REDIS_TUI_DB")]
     db: u16,
 
-    /// Full Redis URL (overrides host/port/password/db)
-    #[arg(short, long)]
-    url: Option<String>,
-
-    /// Path to hosts file (one Redis URL per line, # for comments).
-    /// Connects to all listed hosts and aggregates keys.
-    #[arg(long)]
-    hosts_file: Option<String>,
-
     /// Rolling window for ingestion rate chart history (minutes)
-    #[arg(long, default_value_t = 20, value_parser = clap::value_parser!(u64).range(1..))]
+    #[arg(long, default_value_t = 20, env = "REDIS_TUI_RATE_HISTORY",
+          value_parser = clap::value_parser!(u64).range(1..))]
     rate_history: u64,
 
     /// Sliding window for the plotted ingestion rate line (seconds)
-    #[arg(long, default_value_t = 2, value_parser = clap::value_parser!(u64).range(1..))]
+    #[arg(long, default_value_t = 2, env = "REDIS_TUI_RATE_AVG_WINDOW",
+          value_parser = clap::value_parser!(u64).range(1..))]
     rate_avg_window: u64,
 
-    /// Retry attempts for a multi-host entry that is not up yet
-    #[arg(long, default_value_t = 5, value_parser = clap::value_parser!(u32).range(0..))]
+    /// Retry attempts for a host that is not up yet
+    #[arg(long, default_value_t = 5, env = "REDIS_TUI_CONNECT_RETRIES",
+          value_parser = clap::value_parser!(u32).range(0..))]
     connect_retries: u32,
 
-    /// Socket timeout per connection attempt in multi-host mode (seconds)
-    #[arg(long, default_value_t = 3, value_parser = clap::value_parser!(u64).range(1..))]
+    /// Socket timeout per connection attempt (seconds)
+    #[arg(long, default_value_t = 3, env = "REDIS_TUI_CONNECT_TIMEOUT",
+          value_parser = clap::value_parser!(u64).range(1..))]
     connect_timeout: u64,
-}
-
-impl Args {
-    fn redis_url(&self) -> String {
-        if let Some(url) = &self.url {
-            return url.clone();
-        }
-        let auth = match &self.password {
-            Some(pw) => format!(":{}@", pw),
-            None => String::new(),
-        };
-        format!("redis://{}{}:{}/{}", auth, self.host, self.port, self.db)
-    }
-}
-
-/// Parse a hosts file. Each line is a Redis URL. Lines starting with # are comments.
-/// Blank lines are skipped. Returns (label, url) pairs.
-fn parse_hosts_file(path: &str) -> Result<Vec<(String, String)>> {
-    let content = std::fs::read_to_string(path)
-        .with_context(|| format!("Failed to read hosts file: {}", path))?;
-
-    let mut hosts = Vec::new();
-    let mut problems: Vec<String> = Vec::new();
-
-    for (i, line) in content.lines().enumerate() {
-        // Physical line number, so blanks and comments above a bad entry do not
-        // shift what gets reported back to the user.
-        let lineno = i + 1;
-        let trimmed = line.trim();
-        if trimmed.is_empty() || trimmed.starts_with('#') {
-            continue;
-        }
-
-        // Validate with the same parser `RedisClient::connect` uses, rather than
-        // a hand-rolled check that could drift from what redis-rs accepts. An
-        // entry that fails here can never connect, so it must not reach the
-        // retry loop in `MultiRedisClient::from_urls`.
-        if let Err(e) = redis::Client::open(trimmed) {
-            problems.push(format!(
-                "  line {}: {}\n    {}{}",
-                lineno,
-                trimmed,
-                e,
-                scheme_hint(trimmed)
-            ));
-            continue;
-        }
-
-        // Use the host:port portion as a label, or fallback to line number
-        let label = trimmed
-            .strip_prefix("redis://")
-            .and_then(|s| s.split('/').next())
-            .map(|s| {
-                // Remove auth portion for label
-                if let Some(at_pos) = s.rfind('@') {
-                    s[at_pos + 1..].to_string()
-                } else {
-                    s.to_string()
-                }
-            })
-            .unwrap_or_else(|| format!("host-{}", lineno));
-        hosts.push((label, trimmed.to_string()));
-    }
-
-    if !problems.is_empty() {
-        anyhow::bail!(
-            "Hosts file '{}' has {} invalid {}:\n{}",
-            path,
-            problems.len(),
-            if problems.len() == 1 {
-                "entry"
-            } else {
-                "entries"
-            },
-            problems.join("\n")
-        );
-    }
-
-    if hosts.is_empty() {
-        anyhow::bail!("Hosts file '{}' contains no valid URLs", path);
-    }
-
-    Ok(hosts)
-}
-
-/// Suggest the scheme-prefixed form when an entry looks like a bare `host:port`.
-/// That is the likeliest typo, and the raw redis-rs error for it does not say so.
-fn scheme_hint(entry: &str) -> String {
-    if entry.contains("://") {
-        return String::new();
-    }
-    match entry.split_once(':') {
-        Some((host, port))
-            if !host.is_empty() && !port.is_empty() && port.chars().all(|c| c.is_ascii_digit()) =>
-        {
-            format!(" - did you mean redis://{} ?", entry)
-        }
-        _ => String::new(),
-    }
 }
 
 fn main() -> Result<()> {
     let args = Args::parse();
 
-    // Connect to Redis (single or multi-host)
-    let mut client = if let Some(ref hosts_path) = args.hosts_file {
-        let hosts = parse_hosts_file(hosts_path)?;
-        eprintln!("Connecting to {} hosts...", hosts.len());
-        MultiRedisClient::from_urls(
-            &hosts,
-            args.connect_retries,
-            Duration::from_secs(args.connect_timeout),
-        )?
-    } else {
-        let url = args.redis_url();
-        MultiRedisClient::from_single(&url)
-            .with_context(|| format!("Failed to connect to Redis at {}", url))?
+    let defaults = hosts::HostDefaults {
+        username: args.username.clone(),
+        password: args.password.clone(),
+        db: args.db,
     };
+    let entries = hosts::parse_host_entries(&args.hosts, &defaults)?;
+    eprintln!("Connecting to {} host(s)...", entries.len());
+    let mut client = MultiRedisClient::from_entries(
+        &entries,
+        args.connect_retries,
+        Duration::from_secs(args.connect_timeout),
+    )?;
 
     // Install panic hook that restores the terminal before printing the panic.
     // Only run cleanup on the main thread — a background thread panic should not
@@ -253,8 +161,15 @@ struct StreamListener {
 }
 
 impl StreamListener {
-    fn start(url: &str, key: &str, last_id: &str, db: i64) -> Option<Self> {
-        let mut client = RedisClient::connect(url).ok()?;
+    fn start(
+        info: redis::ConnectionInfo,
+        label: &str,
+        key: &str,
+        last_id: &str,
+        db: i64,
+    ) -> Option<Self> {
+        let mut client =
+            RedisClient::connect_with_info(info, label, std::time::Duration::from_secs(10)).ok()?;
         if db != 0 {
             client.select_db(db).ok()?;
         }
@@ -322,8 +237,15 @@ struct SignalGenerator {
 }
 
 impl SignalGenerator {
-    fn start(url: &str, key: &str, db: i64, config: app::SignalGenConfig) -> Option<Self> {
-        let mut client = RedisClient::connect(url).ok()?;
+    fn start(
+        info: redis::ConnectionInfo,
+        label: &str,
+        key: &str,
+        db: i64,
+        config: app::SignalGenConfig,
+    ) -> Option<Self> {
+        let mut client =
+            RedisClient::connect_with_info(info, label, std::time::Duration::from_secs(10)).ok()?;
         if db != 0 {
             client.select_db(db).ok()?;
         }
@@ -529,10 +451,11 @@ fn run_app(
                                         .unwrap_or(10.0),
                                 };
                                 if let Some(k) = app.selected_key_name().map(|s| s.to_string()) {
-                                    let key_url = client.url_for_key(&k).to_string();
-                                    if let Some(sg) =
-                                        SignalGenerator::start(&key_url, &k, app.db, config)
-                                    {
+                                    let key_info = client.info_for_key(&k);
+                                    let key_label = client.host_label_for_key(&k).to_string();
+                                    if let Some(sg) = SignalGenerator::start(
+                                        key_info, &key_label, &k, app.db, config,
+                                    ) {
                                         // Evict oldest if at capacity (non-blocking)
                                         if signal_generators.len() >= app::MAX_PLOT_SLOTS {
                                             let mut oldest = signal_generators.remove(0);
@@ -609,10 +532,11 @@ fn run_app(
                                             .last_stream_id
                                             .clone()
                                             .unwrap_or_else(|| "$".to_string());
-                                        let key_url = client.url_for_key(&k).to_string();
-                                        if let Some(sl) =
-                                            StreamListener::start(&key_url, &k, &lid, app.db)
-                                        {
+                                        let key_info = client.info_for_key(&k);
+                                        let key_label = client.host_label_for_key(&k).to_string();
+                                        if let Some(sl) = StreamListener::start(
+                                            key_info, &key_label, &k, &lid, app.db,
+                                        ) {
                                             // Evict oldest if at capacity (non-blocking)
                                             if stream_listeners.len() >= app::MAX_PLOT_SLOTS {
                                                 let mut oldest = stream_listeners.remove(0);
@@ -1367,6 +1291,7 @@ fn handle_mouse_event(app: &mut App, mouse: MouseEvent) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use clap::CommandFactory;
 
     fn make_app_with_fields(freq: &str, amp: &str, noise: &str, samples: &str, rate: &str) -> App {
         let mut app = App::new();
@@ -1643,117 +1568,117 @@ mod tests {
         );
     }
 
-    // ─── parse_hosts_file ────────────────────────────────────
+    // ─── CLI parsing ─────────────────────────────────────────
 
-    /// Write `content` to a temp file and parse it. Returns the parse result so a
-    /// test can assert on either the hosts or the error text.
-    fn parse_hosts_str(content: &str) -> Result<Vec<(String, String)>> {
-        let dir = std::env::temp_dir();
-        let path = dir.join(format!(
-            "redis-tui-hosts-test-{}-{:?}.txt",
-            std::process::id(),
-            std::thread::current().id()
-        ));
-        std::fs::write(&path, content).unwrap();
-        let result = parse_hosts_file(path.to_str().unwrap());
-        let _ = std::fs::remove_file(&path);
-        result
+    // Environment variables are process-global and cargo runs tests as threads,
+    // so these drive the parser with an explicit argv rather than mutating the
+    // real environment, which would make them order-dependent.
+    #[test]
+    fn hosts_defaults_to_localhost() {
+        let a = Args::try_parse_from(["redis-tui"]).unwrap();
+        assert_eq!(a.hosts, vec!["127.0.0.1:6379".to_string()]);
+        assert_eq!(a.db, 0);
+        assert_eq!(a.username, None);
     }
 
     #[test]
-    fn parse_hosts_accepts_a_valid_file_with_comments_and_blanks() {
-        let hosts = parse_hosts_str(
-            "# leading comment\n\nredis://127.0.0.1:6379/0\n\n# another\nredis://127.0.0.1:6380/1\n",
-        )
-        .expect("valid file should parse");
-        assert_eq!(hosts.len(), 2);
-        assert_eq!(hosts[0].1, "redis://127.0.0.1:6379/0");
-        assert_eq!(hosts[1].1, "redis://127.0.0.1:6380/1");
+    fn hosts_accepts_several_space_separated_values() {
+        let a = Args::try_parse_from(["redis-tui", "--hosts", "db1", "db2:6380"]).unwrap();
+        assert_eq!(a.hosts, vec!["db1".to_string(), "db2:6380".to_string()]);
     }
 
-    /// This build has no TLS: Cargo.toml declares `redis = "1.0"` with no TLS
-    /// feature, so redis-rs refuses a `rediss://` URL outright. Reporting that at
-    /// parse time is the point - previously the entry was accepted, then spent the
-    /// whole retry budget failing to connect before being silently dropped.
     #[test]
-    fn parse_hosts_rejects_rediss_because_tls_is_not_compiled_in() {
-        let err = parse_hosts_str("rediss://example.com:6380/0\n")
-            .expect_err("this build has no TLS support");
-        let msg = err.to_string();
-        assert!(msg.contains("line 1"), "should name the line: {}", msg);
+    fn hosts_is_repeatable() {
+        let a = Args::try_parse_from(["redis-tui", "--hosts", "db1", "--hosts", "db2"]).unwrap();
+        assert_eq!(a.hosts, vec!["db1".to_string(), "db2".to_string()]);
+    }
+
+    #[test]
+    fn a_following_flag_is_not_swallowed_by_the_hosts_list() {
+        let a = Args::try_parse_from(["redis-tui", "--hosts", "db1", "db2", "--db", "4"]).unwrap();
+        assert_eq!(a.hosts, vec!["db1".to_string(), "db2".to_string()]);
+        assert_eq!(a.db, 4);
+    }
+
+    // 1.x scripts that named a single host keep working: `--host` stays as a
+    // hidden alias for `--hosts`. `--port` is gone, so anything that also set a
+    // port has to move to the `host:port` form.
+    #[test]
+    fn host_is_accepted_as_a_deprecated_alias_for_hosts() {
+        let a = Args::try_parse_from(["redis-tui", "--host", "db1"]).unwrap();
+        assert_eq!(a.hosts, vec!["db1".to_string()]);
+    }
+
+    #[test]
+    fn the_host_alias_carries_a_port_like_any_other_entry() {
+        let a = Args::try_parse_from(["redis-tui", "--host", "db1:6380"]).unwrap();
+        assert_eq!(a.hosts, vec!["db1:6380".to_string()]);
+    }
+
+    // The alias exists for scripts, not for discovery: advertising it in --help
+    // would undercut the point of there being one flag. Stripping `--hosts`
+    // first keeps this from matching the real flag's own name.
+    #[test]
+    fn the_host_alias_is_not_advertised_in_help() {
+        // `--help` renders the long form, which is where a doc comment's extra
+        // paragraphs land, so short help alone would not catch a leak.
+        let help = Args::command().render_long_help().to_string();
+        let without_the_real_flag = help.replace("--hosts", "");
         assert!(
-            msg.to_lowercase().contains("tls"),
-            "should say why, mentioning TLS: {}",
-            msg
+            !without_the_real_flag.contains("--host"),
+            "--help should not mention the deprecated alias:\n{}",
+            help
         );
     }
 
     #[test]
-    fn parse_hosts_rejects_bare_host_port_with_a_scheme_hint() {
-        let err = parse_hosts_str("localhost:6379\n").expect_err("bare host:port is not a URL");
-        let msg = err.to_string();
-        assert!(msg.contains("line 1"), "should name the line: {}", msg);
-        assert!(
-            msg.contains("localhost:6379"),
-            "should quote the entry: {}",
-            msg
-        );
-        assert!(
-            msg.contains("redis://localhost:6379"),
-            "should suggest the scheme-prefixed form: {}",
-            msg
-        );
+    fn the_removed_flags_are_rejected() {
+        for flag in ["--port", "--url", "--hosts-file"] {
+            assert!(
+                Args::try_parse_from(["redis-tui", flag, "x"]).is_err(),
+                "{} should no longer be accepted",
+                flag
+            );
+        }
     }
 
     #[test]
-    fn parse_hosts_rejects_a_url_with_no_host() {
-        let err = parse_hosts_str("redis://\n").expect_err("no host is not usable");
-        assert!(err.to_string().contains("line 1"), "{}", err);
+    fn username_and_password_are_accepted() {
+        let a = Args::try_parse_from([
+            "redis-tui",
+            "--hosts",
+            "db1",
+            "--username",
+            "admin",
+            "--password",
+            "s3cret",
+        ])
+        .unwrap();
+        assert_eq!(a.username.as_deref(), Some("admin"));
+        assert_eq!(a.password.as_deref(), Some("s3cret"));
     }
 
     #[test]
-    fn parse_hosts_rejects_outright_garbage() {
-        let err = parse_hosts_str("!!! not a url at all\n").expect_err("garbage is not a URL");
-        assert!(err.to_string().contains("line 1"), "{}", err);
+    fn numeric_ranges_are_still_enforced() {
+        assert!(Args::try_parse_from(["redis-tui", "--connect-timeout", "0"]).is_err());
+        assert!(Args::try_parse_from(["redis-tui", "--rate-history", "0"]).is_err());
+        assert!(Args::try_parse_from(["redis-tui", "--rate-avg-window", "0"]).is_err());
     }
 
     #[test]
-    fn parse_hosts_reports_every_bad_line_not_just_the_first() {
-        let err = parse_hosts_str("localhost:6379\nredis://127.0.0.1:6379\nalso-bad:1\n")
-            .expect_err("two bad lines");
-        let msg = err.to_string();
-        assert!(msg.contains("localhost:6379"), "first bad entry: {}", msg);
-        assert!(msg.contains("also-bad:1"), "second bad entry: {}", msg);
-    }
-
-    #[test]
-    fn parse_hosts_line_numbers_count_blanks_and_comments() {
-        // The bad entry is on physical line 4; blanks and comments above it must
-        // not shift the number that gets reported.
-        let err = parse_hosts_str("# comment\n\n\nbad-entry:1\n").expect_err("bad entry");
-        let msg = err.to_string();
-        assert!(
-            msg.contains("line 4"),
-            "should report physical line 4, got: {}",
-            msg
-        );
-    }
-
-    #[test]
-    fn parse_hosts_rejects_a_file_with_no_entries() {
-        let err = parse_hosts_str("# only a comment\n\n").expect_err("nothing usable");
-        assert!(err.to_string().contains("no valid URLs"), "{}", err);
-    }
-
-    #[test]
-    fn parse_hosts_label_strips_scheme_auth_and_db() {
-        let hosts = parse_hosts_str("redis://:secret@10.0.0.5:6379/2\n").unwrap();
-        assert_eq!(hosts[0].0, "10.0.0.5:6379");
-    }
-
-    #[test]
-    fn parse_hosts_label_for_a_url_without_auth() {
-        let hosts = parse_hosts_str("redis://127.0.0.1:6379/0\n").unwrap();
-        assert_eq!(hosts[0].0, "127.0.0.1:6379");
+    fn help_advertises_the_environment_variables() {
+        let help = Args::command().render_help().to_string();
+        for var in [
+            "REDIS_TUI_HOSTS",
+            "REDIS_TUI_USERNAME",
+            "REDIS_TUI_PASSWORD",
+            "REDIS_TUI_DB",
+            "REDIS_TUI_RATE_HISTORY",
+            "REDIS_TUI_RATE_AVG_WINDOW",
+            "REDIS_TUI_CONNECT_RETRIES",
+            "REDIS_TUI_CONNECT_TIMEOUT",
+        ] {
+            assert!(help.contains(var), "--help should mention {}", var);
+        }
     }
 }

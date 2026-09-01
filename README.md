@@ -47,13 +47,22 @@ To build it yourself instead:
 
 ```bash
 docker build -t redis-tui .
-docker run -it --rm redis-tui --host <redis-host>
+docker run -it --rm redis-tui --hosts <redis-host>
 ```
 
 To connect to Redis running on the host machine:
 
 ```bash
 docker run -it --rm --network host redis-tui
+```
+
+Passing the connection through the environment avoids a long argument list:
+
+```bash
+docker run -it --rm --network host \
+  -e REDIS_TUI_HOSTS="db1 db2:6380" \
+  -e REDIS_TUI_DB=1 \
+  adregistry.fnal.gov/instrumentation/redis-tui
 ```
 
 ### Dev environment
@@ -73,19 +82,26 @@ Requires `redis-server`, `redis-cli`, and `python3` to be installed.
 redis-tui
 
 # Connect to a remote host
-redis-tui --host 10.0.0.5 --port 6380
+redis-tui --hosts 10.0.0.5:6380
 
 # Connect with a full URL
-redis-tui --url redis://:password@host:6379/2
+redis-tui --hosts redis://:password@host:6379/2
 
-# Connect to multiple hosts
-redis-tui --hosts-file hosts.txt
+# Connect to several hosts at once, mixing the forms
+redis-tui --hosts db1 db2:6380 redis://svc:pw@db3/2
 
 # Widen the ingestion rate chart to an hour, averaged over 5s
 redis-tui --rate-history 60 --rate-avg-window 5
 
-# Wait longer for multi-host entries that are still booting
-redis-tui --hosts-file hosts.txt --connect-retries 10 --connect-timeout 5
+# Wait longer for hosts that are still booting
+redis-tui --hosts db1 db2 --connect-retries 10 --connect-timeout 5
+```
+
+Every option can be set from the environment instead, with the flag winning if
+both are given:
+
+```bash
+REDIS_TUI_HOSTS="db1 db2:6380" REDIS_TUI_DB=1 redis-tui
 ```
 
 See [MANUAL.md](MANUAL.md#command-line-options) for the full flag reference.
