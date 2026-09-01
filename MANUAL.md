@@ -388,7 +388,7 @@ While a stream listener is active, redis-tui tracks how many entries arrive per 
 When listening to a stream key, two lines are injected at the top of the value view:
 
 ```
-Rate:  1s:X  5s:X  10s:X  20s:X  30s:X  /s   [⚠ N gaps]
+Rate:  1s:X  5s:X  10s:X  20s:X  30s:X  /s   [⚠ lagging Ns]  [⚠ N gaps]
 Stats: Min:X  Q1:X  Med:X  Q3:X  Max:X  /s
 ```
 
@@ -404,7 +404,7 @@ Stats: Min:X  Q1:X  Med:X  Q3:X  Max:X  /s
 Press `i` to replace the right panel with a full rate chart:
 
 ```
-┌─ Ingestion Rate [i]  |  N entries  (chart: 2s avg) ──┐
+┌─ Ingestion Rate [i]  |  N entries  [| lagging Ns]  (chart: 2s avg) ──┐
 │ Avg: 1s:X  5s:X  10s:X  20s:X  30s:X  /s            │
 │ Stats: Min:X  Q1:X  Med:X  Q3:X  Max:X  /s           │
 │ [chart — rolling rate over --rate-history window]     │

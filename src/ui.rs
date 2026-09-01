@@ -288,6 +288,15 @@ fn draw_value_view(frame: &mut Frame, app: &mut App, area: Rect) {
                     ));
                 }
                 spans.push(Span::styled("/s", dim));
+                // The rate is measured on the stream's own clock, so say how
+                // far behind that clock is rather than let a stale figure read
+                // as current.
+                if tracker.is_lagging(now_ms) {
+                    spans.push(Span::styled(
+                        format!("  ⚠ lagging {:.0}s", tracker.lag_ms(now_ms) as f64 / 1000.0),
+                        Style::default().fg(Color::Yellow),
+                    ));
+                }
                 if gap_count > 0 {
                     spans.push(Span::styled(
                         format!(
@@ -429,10 +438,15 @@ fn draw_rate_view(frame: &mut Frame, app: &App, area: Rect) {
     } else {
         String::new()
     };
+    let lag_label = if tracker.is_lagging(now_ms) {
+        format!("  | lagging {:.0}s", tracker.lag_ms(now_ms) as f64 / 1000.0)
+    } else {
+        String::new()
+    };
     let chart_window = app.rate_avg_window_secs.max(1);
     let block_title = format!(
-        " Ingestion Rate [i]  |  {} entries{}  (chart: {}s avg) ",
-        total, gap_label, chart_window
+        " Ingestion Rate [i]  |  {} entries{}{}  (chart: {}s avg) ",
+        total, gap_label, lag_label, chart_window
     );
 
     // Render the outer block (border + title) and split its inner area
@@ -1997,6 +2011,81 @@ impl App {
 mod tests {
     use super::*;
     use ratatui::{backend::TestBackend, Terminal};
+
+    // ─── #88: a lagging rate must be labelled as such ────────
+
+    /// Wall-clock now, because `draw_value_view` reads the system clock itself.
+    /// Synthetic timestamps would render as a lag of several years.
+    fn now_ms() -> u64 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as u64
+    }
+
+    /// A listening stream key whose newest entry is `lag_ms` behind `now_ms`.
+    fn app_listening_with_lag(now_ms: u64, lag_ms: u64) -> App {
+        let mut app = App::new();
+        app.keys = vec!["s:live".to_string()];
+        app.key_list_state.select(Some(0));
+        app.listening_keys = vec!["s:live".to_string()];
+        app.current_key_info = Some(crate::redis_client::KeyInfo {
+            name: "s:live".to_string(),
+            key_type: "stream".to_string(),
+            ttl: -1,
+            size: 512,
+            encoding: "stream".to_string(),
+        });
+        app.current_value = Some(crate::redis_client::RedisValue::Stream(vec![]));
+
+        let newest = now_ms - lag_ms;
+        let entries: Vec<crate::redis_client::StreamEntry> = (0..50)
+            .map(|i| crate::redis_client::StreamEntry {
+                id: format!("{}-0", newest - (49 - i) * 20),
+                fields: vec![("_".to_string(), vec![0u8; 8])],
+            })
+            .collect();
+        app.update_rate_tracker("s:live", &entries, now_ms);
+        app
+    }
+
+    fn rendered(app: &mut App) -> String {
+        let backend = TestBackend::new(100, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| draw_value_view(frame, app, Rect::new(0, 0, 100, 24)))
+            .unwrap();
+        let buf = terminal.backend().buffer().clone();
+        (0..24)
+            .map(|y| {
+                (0..100)
+                    .map(|x| buf.cell((x, y)).unwrap().symbol().to_string())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    // The rate is measured on the stream's own clock, so a stream that stopped
+    // keeps reporting its last rate. Presenting that as current would be a
+    // different lie from the zero it replaced.
+    #[test]
+    fn a_lagging_rate_is_labelled_in_the_value_view() {
+        let mut app = app_listening_with_lag(now_ms(), 30_000);
+        let text = rendered(&mut app);
+        assert!(
+            text.contains("lagging"),
+            "a 30s-old rate must not read as current:\n{}",
+            text
+        );
+    }
+
+    #[test]
+    fn a_current_rate_is_not_labelled_as_lagging() {
+        let mut app = app_listening_with_lag(now_ms(), 0);
+        let text = rendered(&mut app);
+        assert!(!text.contains("lagging"), "false lag warning:\n{}", text);
+    }
 
     // ─── #87: a capped collection must say so ────────────────
 

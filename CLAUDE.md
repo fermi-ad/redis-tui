@@ -47,7 +47,7 @@ Five source modules in `src/`, single binary:
 ```
 Redis → MultiRedisClient → App state → ui::draw()
                               ↑
-         StreamListener ──────┘ (mpsc channel, bounded drain 20/tick)
+         StreamListener ──────┘ (mpsc channel, coalesced drain, 10ms budget/tick)
                           also drives RateTracker per key (update_rate_tracker)
          SignalGenerator ──────→ Redis (XADD + XTRIM 100)
          FFT thread ───────────→ App.fft_rx (mpsc, polled via try_recv)
@@ -76,13 +76,13 @@ The main thread owns all `App` state and renders UI. Background threads communic
 
 `RateTracker` (in `app.rs`) is stored per stream key in `App.rate_trackers: HashMap<String, RateTracker>`. It is populated by `update_rate_tracker()` called from the main loop drain for every active `StreamListener`.
 
-- **`entry_timestamps`**: ring buffer of entry ID unix_ms timestamps, always pruned to 60s. Used to compute multi-window averages at render time via `rate_for_window(window_secs, now_ms)`.
+- **`entry_timestamps`**: ring buffer of entry ID unix_ms timestamps, always pruned to 60s. Used to compute multi-window averages at render time via `rate_for_window(window_secs, now_ms)`, which windows against the **newest entry**, not `now_ms` — windowing on the wall clock made any backlog read as 0/s. `lag_ms`/`is_lagging` report how far behind that stream clock is, and the UI labels a rate older than `RATE_LAG_WARN_MS` (2s) as lagging.
 - **`rate_history`**: `(unix_ms, rate)` samples for the chart, computed using `--rate-avg-window` (default 2s) sliding window. Pruned to `--rate-history` (default 20 min). Recording is delayed by one full avg-window after listener start to avoid warmup transients skewing the minimum.
 - **`gaps`**: unix_ms timestamps where a jump of >1.85× the expected inter-arrival interval was detected — indicates entries may have been written and trimmed before XREAD could read them.
 - **`five_num`**: cached `Option<[f64; 5]>` five-number summary [min, Q1, median, Q3, max] of all `rate_history` values. Recomputed at most once per second. `None` during the warmup period.
 - **`tracking_start_ms`**: `Option<u64>` set on first call to `update_rate_tracker`. Used to compute the warmup countdown shown in the value view stats line.
 
-Key `i` toggles `app.rate_view`, which replaces the right panel with `draw_rate_view()`. Rate tracker is cleared (`clear_rate_tracker`) when a listener stops. The rate and stats lines in the value view are always shown for any actively-listened stream key; during warmup the stats line shows a live countdown until data is available.
+Key `i` toggles `app.rate_view`, which replaces the right panel with `draw_rate_view()`. Per-listener state is dropped by `App::stop_listening`, which both listener removal paths go through — `main.rs`'s `stop_listener` is the only place a listener is removed, because the eviction path once drifted from the explicit-stop path and skipped the cleanup. The rate and stats lines in the value view are always shown for any actively-listened stream key; during warmup the stats line shows a live countdown until data is available.
 
 **CLI flags:**
 - `--rate-history <minutes>` — rolling chart window (default 20)
@@ -156,3 +156,4 @@ There is no `tests/` directory: this is a binary-only crate with no lib target, 
 - `scan_keys` drives the SCAN cursor by hand — never `Cmd::iter`. Its errors arrive through the same `Result` as a UTF-8 decode failure and do not advance the cursor, so treating every `Err` as a skippable key name re-issues the same SCAN forever
 - Nothing reachable from `run_app` may print to stdout or stderr: raw mode owns the alternate screen. Per-host scan failures travel back as `MultiRedisClient::host_errors` and land on the status line. The `eprintln!`s in `from_entries` are fine — they run before raw mode
 - `stream-device.py` simulates an instrumentation device: continuous float32 waveforms via `XADD <key> * source device _ <blob>` plus `XTRIM MAXLEN ~`. It speaks RESP over a stdlib socket — the `redis` python package is not a dependency, and one `redis-cli` per entry cannot hold 1200 entries/s. Phase carries across entries so the waveform is continuous and the FFT view shows a signal rather than a per-entry discontinuity
+- The stream drain is bounded by time, never by message count: `drained += 1` per message capped throughput at 400 messages/s regardless of entries carried, and a producer writing entries individually above that grew the channel without bound. `drain_listener` coalesces a listener's whole queue into one batch under a 10ms budget

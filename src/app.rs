@@ -37,6 +37,9 @@ pub struct PlotSlot {
 pub const RATE_WINDOWS: &[(u64, &str)] =
     &[(1, "1s"), (5, "5s"), (10, "10s"), (20, "20s"), (30, "30s")];
 
+/// How far behind the wall clock a stream's newest entry may fall before the
+/// rate is labelled as lagging rather than presented as current.
+pub const RATE_LAG_WARN_MS: u64 = 2_000;
 /// How long (ms) a display width stays pinned after it would otherwise shrink
 const RATE_WIDTH_HYSTERESIS_MS: u64 = 3_000;
 /// Fractional dead band for displayed values — only update display when value moves by this fraction
@@ -230,17 +233,45 @@ pub const PLOT_WINDOW: usize = 2000;
 impl RateTracker {
     /// Count entries with ID timestamps within the last `window_secs` seconds,
     /// expressed relative to `now_ms`. Returns entries/second.
+    /// Entries per second over the last `window_secs`, measured against the
+    /// stream's own newest entry rather than the wall clock.
+    ///
+    /// Windowing on `now_ms` made a backlog read as no traffic at all: once the
+    /// drain fell behind, the newest entry processed was older than the window,
+    /// every window counted zero, and the rate display reported 0.0 while the
+    /// status bar printed "+20 entries (live)" (#88). Measuring on the stream's
+    /// timeline reports what the data says instead.
+    ///
+    /// The cost is that a stopped stream keeps reporting its last rate rather
+    /// than decaying to zero, so callers must show `lag_ms` alongside it.
     pub fn rate_for_window(&self, window_secs: u64, now_ms: u64) -> f64 {
         if window_secs == 0 {
             return 0.0;
         }
-        let cutoff = now_ms.saturating_sub(window_secs * 1000);
+        let reference = self.entry_timestamps.back().copied().unwrap_or(now_ms);
+        let cutoff = reference.saturating_sub(window_secs * 1000);
         let count = self
             .entry_timestamps
             .iter()
             .filter(|&&ts| ts >= cutoff)
             .count();
         count as f64 / window_secs as f64
+    }
+
+    /// How far behind wall-clock time the newest processed entry is.
+    ///
+    /// Zero for a tracker with no entries, and for one that is keeping up.
+    pub fn lag_ms(&self, now_ms: u64) -> u64 {
+        match self.entry_timestamps.back() {
+            Some(&newest) => now_ms.saturating_sub(newest),
+            None => 0,
+        }
+    }
+
+    /// Whether the rate being displayed describes a time far enough in the past
+    /// that presenting it as current would mislead.
+    pub fn is_lagging(&self, now_ms: u64) -> bool {
+        self.lag_ms(now_ms) >= RATE_LAG_WARN_MS
     }
 
     /// Update a sticky display width: grows immediately, shrinks only after RATE_WIDTH_HYSTERESIS_MS.
@@ -757,6 +788,16 @@ impl App {
     /// Remove the rate tracker for a key (called when listener stops).
     pub fn clear_rate_tracker(&mut self, key_name: &str) {
         self.rate_trackers.remove(key_name);
+    }
+
+    /// Drop the state that only makes sense while a listener is running.
+    ///
+    /// One home for the rule, because there are two removal paths and the
+    /// eviction one drifted: it was a copy of the explicit-stop sequence with
+    /// the tracker cleanup missing (#96). Anything future listeners accumulate
+    /// belongs here rather than at either call site.
+    pub fn stop_listening(&mut self, key_name: &str) {
+        self.clear_rate_tracker(key_name);
     }
 
     pub fn refresh_keys(&mut self, client: &mut MultiRedisClient) {
@@ -2401,6 +2442,85 @@ mod tests {
             !app.edit_binary_mode,
             "binary mode leaked from the previous edit"
         );
+    }
+
+    // ─── #96: a stopped listener leaves nothing behind ───────
+
+    #[test]
+    fn stopping_a_listener_drops_its_rate_tracker() {
+        let mut app = App::new();
+        let e = StreamEntry {
+            id: "1000-0".to_string(),
+            fields: vec![("_".to_string(), vec![0u8; 8])],
+        };
+        app.update_rate_tracker("s1", std::slice::from_ref(&e), 1_000);
+        assert!(app.rate_trackers.contains_key("s1"), "precondition");
+
+        app.stop_listening("s1");
+
+        assert!(
+            !app.rate_trackers.contains_key("s1"),
+            "a frozen tracker keeps rendering a dead key and makes a later \
+             re-listen record a spurious gap"
+        );
+    }
+
+    // ─── #88: a backlog must not read as zero ────────────────
+
+    /// A tracker holding `n` entries spaced `step_ms` apart, ending at `newest`.
+    fn tracker_ending_at(newest: u64, n: u64, step_ms: u64) -> RateTracker {
+        let mut t = RateTracker::default();
+        for i in 0..n {
+            t.entry_timestamps.push_back(newest - (n - 1 - i) * step_ms);
+        }
+        t.last_entry_ms = Some(newest);
+        t
+    }
+
+    // The reported bug: the drain falls behind, so the newest entry the app has
+    // processed is older than the averaging window. Windowing on wall-clock
+    // time then counted nothing and every window read 0.0 -- while the status
+    // bar still printed "+20 entries (live)". The rate must describe the
+    // stream's own timeline.
+    #[test]
+    fn a_backlogged_rate_does_not_read_zero() {
+        // 100 entries across one second, processed 30s late.
+        let newest = 1_000_000_000u64;
+        let t = tracker_ending_at(newest, 100, 10);
+        let now = newest + 30_000;
+
+        let r = t.rate_for_window(1, now);
+        assert!(r > 0.0, "a backlog must not read as no traffic, got {}", r);
+        assert!((r - 100.0).abs() < 1.0, "expected ~100/s, got {}", r);
+    }
+
+    // A stream that is keeping up must be unaffected.
+    #[test]
+    fn a_current_rate_is_unchanged() {
+        let newest = 1_000_000_000u64;
+        let t = tracker_ending_at(newest, 100, 10);
+        let r = t.rate_for_window(1, newest);
+        assert!((r - 100.0).abs() < 1.0, "expected ~100/s, got {}", r);
+    }
+
+    // Windowing on the stream's clock means a stopped stream keeps reporting
+    // its old rate, so how far behind it is has to be visible.
+    #[test]
+    fn lag_is_reported_so_a_stale_rate_is_not_read_as_current() {
+        let newest = 1_000_000_000u64;
+        let t = tracker_ending_at(newest, 10, 100);
+        assert_eq!(t.lag_ms(newest + 30_000), 30_000);
+        assert_eq!(t.lag_ms(newest), 0, "a current stream is not lagging");
+        assert!(t.is_lagging(newest + 30_000));
+        assert!(!t.is_lagging(newest + 100));
+    }
+
+    #[test]
+    fn an_empty_tracker_reports_no_rate_and_no_lag() {
+        let t = RateTracker::default();
+        assert_eq!(t.rate_for_window(1, 1_000), 0.0);
+        assert_eq!(t.lag_ms(1_000), 0);
+        assert!(!t.is_lagging(1_000));
     }
 
     // ─── #87: truncation must be visible, not silent ─────────
