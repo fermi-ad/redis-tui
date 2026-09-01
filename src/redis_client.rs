@@ -1055,6 +1055,51 @@ mod tests {
     }
 
     /// End-to-end: the skipped count must reach the status line the user actually reads.
+    // #82: the exact reported sequence -- select a binary key, press `s`, press
+    // Enter without typing anything -- grew a 4000-byte float32 blob to 6847
+    // bytes of U+FFFD. It must now leave the bytes untouched.
+    #[test]
+    #[ignore = "requires redis-server; run with: cargo test -- --ignored"]
+    fn enter_on_an_untouched_edit_popup_cannot_destroy_a_binary_key() {
+        let server = TestRedis::start();
+
+        // 1000 little-endian float32 samples, as `start-dev.sh` seeds.
+        let blob: Vec<u8> = (0..1000u32)
+            .flat_map(|i| ((i as f32) * 0.01).sin().to_le_bytes())
+            .collect();
+        assert_eq!(blob.len(), 4000);
+
+        let mut seed = RedisClient::connect(&server.url()).unwrap();
+        redis::cmd("SET")
+            .arg("blob:float32_1k")
+            .arg(&blob)
+            .query::<()>(&mut seed.connection)
+            .unwrap();
+        drop(seed);
+
+        let mut multi = connect_multi(&server.url());
+        let mut app = crate::app::App::new();
+        app.refresh_keys(&mut multi);
+        app.key_list_state.select(Some(0));
+        app.load_selected_value(&mut multi);
+
+        app.start_edit();
+        let result = app.execute_edit(&mut multi);
+        assert!(
+            result.is_err(),
+            "an untouched popup must not write, got {:?}",
+            result
+        );
+
+        let mut check = RedisClient::connect(&server.url()).unwrap();
+        let after: Vec<u8> = redis::cmd("GET")
+            .arg("blob:float32_1k")
+            .query(&mut check.connection)
+            .unwrap();
+        assert_eq!(after.len(), blob.len(), "length changed");
+        assert_eq!(after, blob, "the blob was modified");
+    }
+
     /// Regression test for the delete confirmation acting on the live selection.
     ///
     /// The popup is half the frame wide and does not cover the key list, and mouse

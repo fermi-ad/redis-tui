@@ -147,3 +147,4 @@ There is no `tests/` directory: this is a binary-only crate with no lib target, 
 - Confirmation popups carry their target in `ConfirmAction`; never re-read the live selection when the user answers, since mouse input is not gated by `InputMode`
 - `apply_plot_settings()` handles all field counts (X limits + per-slot Y limits) — no field count checks
 - One flag names where to connect. Connection info is built as `redis::ConnectionInfo`, never by formatting a URL string — a credential interpolated into a URL breaks on `/ # ? @`
+- Never pre-fill the edit popup through `from_utf8_lossy` — it is one-way, and `execute_edit` writes the field straight back. A non-UTF-8 string key opens in binary mode with an empty field instead; gate on `std::str::from_utf8`, never `is_binary()`
