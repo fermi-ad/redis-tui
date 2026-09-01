@@ -23,7 +23,7 @@ use std::sync::{
     atomic::{AtomicBool, Ordering},
     Arc,
 };
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 #[derive(Parser, Debug)]
 #[command(
@@ -303,6 +303,52 @@ impl Drop for SignalGenerator {
     }
 }
 
+/// Take everything a listener has queued, bounded by wall-clock time rather
+/// than by message count.
+///
+/// The previous bound was 20 messages per tick, counted with `drained += 1`
+/// regardless of how many entries each message carried. At the 50ms tick that
+/// is 400 messages/s, and a producer writing entries individually above that
+/// rate outran the consumer, so the unbounded channel grew without limit (#88).
+/// Measured: an unbatched producer at 300 entries/s yields 300 messages/s, one
+/// entry each; a pipelined one at 1200 entries/s yields only 200 messages/s,
+/// which is why the ceiling depends on how the producer writes rather than on
+/// the entry rate alone.
+///
+/// Coalescing is close to free: `App`'s stream state is capped by
+/// `cap_stream_entries` and `append_stream_entries` either way, and
+/// `update_rate_tracker` only needs the parsed timestamps. The budget exists so
+/// a pathological burst cannot stall a frame; one message is always taken, so
+/// the loop makes progress even when the budget is already spent.
+fn drain_listener(rx: &mpsc::Receiver<Vec<StreamEntry>>, budget: Duration) -> Vec<StreamEntry> {
+    let deadline = Instant::now() + budget;
+    let mut out: Vec<StreamEntry> = Vec::new();
+    while let Ok(entries) = rx.try_recv() {
+        out.extend(entries);
+        if Instant::now() >= deadline {
+            break;
+        }
+    }
+    out
+}
+
+/// Stop a listener and drop the state that only made sense while it ran.
+///
+/// Both removal sites go through here. The eviction path used to be a copy of
+/// the explicit-stop sequence with `clear_rate_tracker` missing, which left the
+/// evicted key's tracker frozen in `App.rate_trackers`: the rate view kept
+/// rendering a dead key's chart, and re-listening later compared against a
+/// `last_entry_ms` from minutes ago and recorded a spurious gap (#96).
+fn stop_listener(mut listener: StreamListener, app: &mut App) {
+    listener.stop_flag.store(true, Ordering::Relaxed);
+    if let Some(h) = listener.handle.take() {
+        std::thread::spawn(move || {
+            let _ = h.join();
+        });
+    }
+    app.stop_listening(&listener.watching_key);
+}
+
 fn run_app(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     client: &mut MultiRedisClient,
@@ -527,14 +573,8 @@ fn run_app(
                                         stream_listeners.iter().position(|sl| sl.watching_key == k)
                                     {
                                         // Stop this specific listener (non-blocking)
-                                        let mut sl = stream_listeners.remove(idx);
-                                        sl.stop_flag.store(true, Ordering::Relaxed);
-                                        if let Some(h) = sl.handle.take() {
-                                            std::thread::spawn(move || {
-                                                let _ = h.join();
-                                            });
-                                        }
-                                        app.clear_rate_tracker(&k);
+                                        let sl = stream_listeners.remove(idx);
+                                        stop_listener(sl, &mut app);
                                         app.rate_view = false;
                                         app.status_message = format!("Stream: stopped '{}'", k);
                                     } else {
@@ -550,13 +590,8 @@ fn run_app(
                                         ) {
                                             // Evict oldest if at capacity (non-blocking)
                                             if stream_listeners.len() >= app::MAX_PLOT_SLOTS {
-                                                let mut oldest = stream_listeners.remove(0);
-                                                oldest.stop_flag.store(true, Ordering::Relaxed);
-                                                if let Some(h) = oldest.handle.take() {
-                                                    std::thread::spawn(move || {
-                                                        let _ = h.join();
-                                                    });
-                                                }
+                                                let oldest = stream_listeners.remove(0);
+                                                stop_listener(oldest, &mut app);
                                             }
                                             stream_listeners.push(sl);
                                             app.status_message = format!(
@@ -605,37 +640,30 @@ fn run_app(
         // Check for completed background FFT
         app.poll_fft();
 
-        // Drain new stream entries from all background listeners (bounded per tick)
-        const MAX_DRAIN_PER_TICK: usize = 20;
+        // Drain new stream entries from all background listeners. Bounded by
+        // time, not message count -- see drain_listener.
+        const DRAIN_BUDGET: Duration = Duration::from_millis(10);
         let now_ms = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
             .as_millis() as u64;
         let viewed_key = app.selected_key_name().map(|s| s.to_string());
         for listener in &stream_listeners {
-            let mut total_new = 0;
-            let mut drained = 0;
-            while drained < MAX_DRAIN_PER_TICK {
-                match listener.rx.try_recv() {
-                    Ok(entries) => {
-                        total_new += entries.len();
-                        app.update_rate_tracker(&listener.watching_key, &entries, now_ms);
-                        app.append_slot_stream_entries(&listener.watching_key, &entries);
-                        // Only update main view state if this listener matches the viewed key
-                        if viewed_key.as_deref() == Some(listener.watching_key.as_str()) {
-                            app.append_stream_entries(entries);
-                        }
-                        drained += 1;
-                    }
-                    Err(_) => break,
-                }
+            let entries = drain_listener(&listener.rx, DRAIN_BUDGET);
+            if entries.is_empty() {
+                continue;
             }
-            if total_new > 0 {
-                app.status_message = format!(
-                    "Stream: +{} entries on '{}' (live)",
-                    total_new, listener.watching_key
-                );
+            let total_new = entries.len();
+            app.update_rate_tracker(&listener.watching_key, &entries, now_ms);
+            app.append_slot_stream_entries(&listener.watching_key, &entries);
+            // Only update main view state if this listener matches the viewed key
+            if viewed_key.as_deref() == Some(listener.watching_key.as_str()) {
+                app.append_stream_entries(entries);
             }
+            app.status_message = format!(
+                "Stream: +{} entries on '{}' (live)",
+                total_new, listener.watching_key
+            );
         }
 
         // Sync active key indicators for UI
@@ -1576,6 +1604,75 @@ mod tests {
             app.status_message.contains("entries/sec"),
             "{}",
             app.status_message
+        );
+    }
+
+    // ─── #88: the drain must coalesce, not cap by message ────
+
+    fn entry(id: &str) -> StreamEntry {
+        StreamEntry {
+            id: id.to_string(),
+            fields: vec![("_".to_string(), vec![0u8; 8])],
+        }
+    }
+
+    // The reported leak: the old bound counted messages, not entries -- 20 per
+    // tick at 20 ticks/s, so 400 messages/s regardless of how many entries each
+    // carried. A producer writing entries individually above that outran the
+    // consumer and the channel grew without bound. Measured: an unbatched
+    // producer at 300 entries/s yields 300 messages/s, one entry each.
+    #[test]
+    fn the_drain_takes_everything_queued_not_the_first_twenty_messages() {
+        let (tx, rx) = mpsc::channel();
+        for i in 0..500 {
+            tx.send(vec![entry(&format!("{}-0", 1_000 + i))]).unwrap();
+        }
+        drop(tx);
+
+        let drained = drain_listener(&rx, Duration::from_millis(10));
+        assert_eq!(
+            drained.len(),
+            500,
+            "the backlog must not be left in the channel"
+        );
+        assert_eq!(drained[0].id, "1000-0", "order must be preserved");
+        assert_eq!(drained[499].id, "1499-0");
+    }
+
+    // Messages carrying many entries each must coalesce into one batch, so the
+    // per-tick work is applied once rather than per message.
+    #[test]
+    fn multi_entry_messages_are_coalesced() {
+        let (tx, rx) = mpsc::channel();
+        for m in 0..30 {
+            let batch: Vec<StreamEntry> = (0..11)
+                .map(|i| entry(&format!("{}-{}", 1_000 + m, i)))
+                .collect();
+            tx.send(batch).unwrap();
+        }
+        drop(tx);
+
+        assert_eq!(drain_listener(&rx, Duration::from_millis(10)).len(), 330);
+    }
+
+    #[test]
+    fn an_empty_channel_drains_to_nothing() {
+        let (_tx, rx) = mpsc::channel::<Vec<StreamEntry>>();
+        assert!(drain_listener(&rx, Duration::from_millis(10)).is_empty());
+    }
+
+    // The budget bounds a pathological burst, but must never stall: even with
+    // no time left, one message is taken, so the loop always makes progress.
+    #[test]
+    fn a_spent_budget_still_makes_progress() {
+        let (tx, rx) = mpsc::channel();
+        for i in 0..10 {
+            tx.send(vec![entry(&format!("{}-0", i))]).unwrap();
+        }
+        let drained = drain_listener(&rx, Duration::ZERO);
+        assert!(
+            !drained.is_empty(),
+            "a zero budget must still take one message"
         );
     }
 
