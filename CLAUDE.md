@@ -65,6 +65,7 @@ The main thread owns all `App` state and renders UI. Background threads communic
 |----------|-------|---------|
 | `MAX_PLOT_SLOTS` | 4 | Simultaneous plotted keys |
 | `MAX_STREAM_ENTRIES` | 10 | In-memory stream entries (only last 5 displayed, last entry plotted) |
+| `DEFAULT_MAX_VALUE_ITEMS` | 1,000 | Collection elements fetched per value load (`--max-value-items`) |
 | `PLOT_WINDOW` | 2,000 | Auto-range visible data points |
 | `RATE_WINDOWS` | `[(1,"1s"),(5,"5s"),(10,"10s"),(20,"20s"),(30,"30s")]` | Multi-window averages shown in rate view header and value view |
 
@@ -148,3 +149,4 @@ There is no `tests/` directory: this is a binary-only crate with no lib target, 
 - `apply_plot_settings()` handles all field counts (X limits + per-slot Y limits) — no field count checks
 - One flag names where to connect. Connection info is built as `redis::ConnectionInfo`, never by formatting a URL string — a credential interpolated into a URL breaks on `/ # ? @`
 - Never pre-fill the edit popup through `from_utf8_lossy` — it is one-way, and `execute_edit` writes the field straight back. A non-UTF-8 string key opens in binary mode with an empty field instead; gate on `std::str::from_utf8`, never `is_binary()`
+- No value fetch may be unbounded: `get_value` caps collections at `max_value_items` and returns the true total in `LoadedValue`, so the pane can report what is hidden. Sets and hashes go through `SSCAN`/`HSCAN`, never `SMEMBERS`/`HGETALL`

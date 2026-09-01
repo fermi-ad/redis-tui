@@ -20,6 +20,33 @@ pub struct StreamEntry {
 }
 
 /// The value of a Redis key, typed by its Redis data type
+/// A loaded value plus how much of it exists.
+///
+/// `total_items` is `Some(n)` for a collection, whether or not it was capped -
+/// the pane compares it against what it received to report what is hidden -
+/// and `None` for types that are not collections.
+#[derive(Debug, Clone)]
+pub struct LoadedValue {
+    pub value: RedisValue,
+    pub total_items: Option<usize>,
+}
+
+impl LoadedValue {
+    fn whole(value: RedisValue) -> Self {
+        LoadedValue {
+            value,
+            total_items: None,
+        }
+    }
+
+    fn capped(value: RedisValue, total: usize) -> Self {
+        LoadedValue {
+            value,
+            total_items: Some(total),
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub enum RedisValue {
     String(Vec<u8>),
@@ -178,50 +205,91 @@ impl RedisClient {
         })
     }
 
-    pub fn get_value(&mut self, key: &str) -> Result<RedisValue> {
+    /// Read a key's value, fetching at most `max_items` elements of a
+    /// collection.
+    ///
+    /// Nothing here may fetch a collection whole. Arrow-key navigation
+    /// auto-loads the selected key, so an unbounded LRANGE/SMEMBERS/HGETALL
+    /// meant merely scrolling onto a large key pulled all of it onto the main
+    /// thread (#87). Sets and hashes are read through SSCAN/HSCAN and stopped
+    /// at the cap rather than fetched and trimmed, so the server never
+    /// materialises the whole reply either.
+    ///
+    /// `total_items` carries the collection's true length so the pane can say
+    /// how much is hidden. Strings are not collections: they are returned
+    /// whole, because truncating a binary payload corrupts it.
+    pub fn get_value(&mut self, key: &str, max_items: usize) -> Result<LoadedValue> {
         let key_type: String = redis::cmd("TYPE")
             .arg(key)
             .query(&mut self.connection)
             .unwrap_or_else(|_| "unknown".to_string());
 
+        // COUNT is a per-batch hint: large enough to avoid a round trip per
+        // element, small enough not to undo the cap on a huge collection.
+        let scan_hint = max_items.clamp(10, 1000);
+
         match key_type.as_str() {
             "string" => {
                 let val: Vec<u8> = self.connection.get(key).context("Failed to GET")?;
-                Ok(RedisValue::String(val))
+                Ok(LoadedValue::whole(RedisValue::String(val)))
             }
             "list" => {
+                let total: usize = self.connection.llen(key).context("Failed to LLEN")?;
                 let vals: Vec<Vec<u8>> = self
                     .connection
-                    .lrange(key, 0, -1)
+                    .lrange(key, 0, max_items as isize - 1)
                     .context("Failed to LRANGE")?;
-                Ok(RedisValue::List(vals))
+                Ok(LoadedValue::capped(RedisValue::List(vals), total))
             }
             "set" => {
-                let vals: Vec<Vec<u8>> = self
-                    .connection
-                    .smembers(key)
-                    .context("Failed to SMEMBERS")?;
-                Ok(RedisValue::Set(vals))
+                let total: usize = self.connection.scard(key).context("Failed to SCARD")?;
+                let iter: redis::Iter<Vec<u8>> = redis::cmd("SSCAN")
+                    .arg(key)
+                    .cursor_arg(0)
+                    .arg("COUNT")
+                    .arg(scan_hint)
+                    .clone()
+                    .iter(&mut self.connection)
+                    .context("Failed to SSCAN")?;
+                let mut vals = Vec::new();
+                for item in iter.take(max_items) {
+                    vals.push(item.context("Failed to read a set member")?);
+                }
+                Ok(LoadedValue::capped(RedisValue::Set(vals), total))
             }
             "zset" => {
+                let total: usize = self.connection.zcard(key).context("Failed to ZCARD")?;
                 let vals: Vec<(Vec<u8>, f64)> = self
                     .connection
-                    .zrange_withscores(key, 0, -1)
-                    .context("Failed to ZRANGEBYSCORE")?;
-                Ok(RedisValue::ZSet(vals))
+                    .zrange_withscores(key, 0, max_items as isize - 1)
+                    .context("Failed to ZRANGE")?;
+                Ok(LoadedValue::capped(RedisValue::ZSet(vals), total))
             }
             "hash" => {
-                let map: HashMap<String, Vec<u8>> =
-                    self.connection.hgetall(key).context("Failed to HGETALL")?;
-                let mut pairs: Vec<(String, Vec<u8>)> = map.into_iter().collect();
+                let total: usize = self.connection.hlen(key).context("Failed to HLEN")?;
+                let iter: redis::Iter<(String, Vec<u8>)> = redis::cmd("HSCAN")
+                    .arg(key)
+                    .cursor_arg(0)
+                    .arg("COUNT")
+                    .arg(scan_hint)
+                    .clone()
+                    .iter(&mut self.connection)
+                    .context("Failed to HSCAN")?;
+                let mut pairs: Vec<(String, Vec<u8>)> = Vec::new();
+                for item in iter.take(max_items) {
+                    pairs.push(item.context("Failed to read a hash field")?);
+                }
                 pairs.sort_by(|a, b| a.0.cmp(&b.0));
-                Ok(RedisValue::Hash(pairs))
+                Ok(LoadedValue::capped(RedisValue::Hash(pairs), total))
             }
             "stream" => {
                 let entries = self.get_stream_entries(key)?;
-                Ok(RedisValue::Stream(entries))
+                Ok(LoadedValue::whole(RedisValue::Stream(entries)))
             }
-            other => Ok(RedisValue::Unknown(format!("Unsupported type: {}", other))),
+            other => Ok(LoadedValue::whole(RedisValue::Unknown(format!(
+                "Unsupported type: {}",
+                other
+            )))),
         }
     }
 
@@ -722,8 +790,8 @@ impl MultiRedisClient {
         self.client_for_key(key).get_key_info(key)
     }
 
-    pub fn get_value(&mut self, key: &str) -> Result<RedisValue> {
-        self.client_for_key(key).get_value(key)
+    pub fn get_value(&mut self, key: &str, max_items: usize) -> Result<LoadedValue> {
+        self.client_for_key(key).get_value(key, max_items)
     }
 
     pub fn delete_key(&mut self, key: &str) -> Result<()> {
@@ -1054,7 +1122,117 @@ mod tests {
         assert_eq!(client.db, 0);
     }
 
-    /// End-to-end: the skipped count must reach the status line the user actually reads.
+    // ─── #87: collection fetches must be bounded ─────────────
+
+    /// Seed `n` members of each collection type, then read them back with a
+    /// cap far below `n`.
+    fn seed_big_collections(url: &str, n: usize) {
+        let mut c = RedisClient::connect(url).unwrap();
+        let mut lpush = redis::cmd("RPUSH");
+        lpush.arg("big:list");
+        let mut sadd = redis::cmd("SADD");
+        sadd.arg("big:set");
+        let mut zadd = redis::cmd("ZADD");
+        zadd.arg("big:zset");
+        let mut hset = redis::cmd("HSET");
+        hset.arg("big:hash");
+        for i in 0..n {
+            lpush.arg(format!("item-{:06}", i));
+            sadd.arg(format!("member-{:06}", i));
+            zadd.arg(i as f64).arg(format!("scored-{:06}", i));
+            hset.arg(format!("field-{:06}", i)).arg(i);
+        }
+        for cmd in [&lpush, &sadd, &zadd, &hset] {
+            cmd.query::<()>(&mut c.connection).unwrap();
+        }
+    }
+
+    // The reported hang: arrow-key navigation auto-loads the selected key, so
+    // merely scrolling onto a large collection pulled the whole thing into
+    // memory on the main thread. Every collection type must stop at the cap.
+    #[test]
+    #[ignore = "requires redis-server; run with: cargo test -- --ignored"]
+    fn every_collection_type_is_capped_at_max_items() {
+        let server = TestRedis::start();
+        seed_big_collections(&server.url(), 5000);
+        let mut c = RedisClient::connect(&server.url()).unwrap();
+
+        for key in ["big:list", "big:set", "big:zset", "big:hash"] {
+            let loaded = c.get_value(key, 100).unwrap();
+            let n = match &loaded.value {
+                RedisValue::List(v) | RedisValue::Set(v) => v.len(),
+                RedisValue::ZSet(v) => v.len(),
+                RedisValue::Hash(v) => v.len(),
+                other => panic!("{} loaded as {:?}", key, other),
+            };
+            assert_eq!(n, 100, "{} should stop at the cap, got {}", key, n);
+            assert_eq!(
+                loaded.total_items,
+                Some(5000),
+                "{} should report its true length",
+                key
+            );
+        }
+    }
+
+    // Under the cap nothing is hidden, and the totals still agree.
+    #[test]
+    #[ignore = "requires redis-server; run with: cargo test -- --ignored"]
+    fn a_small_collection_is_returned_whole() {
+        let server = TestRedis::start();
+        seed_big_collections(&server.url(), 7);
+        let mut c = RedisClient::connect(&server.url()).unwrap();
+
+        for key in ["big:list", "big:set", "big:zset", "big:hash"] {
+            let loaded = c.get_value(key, 100).unwrap();
+            assert_eq!(loaded.total_items, Some(7), "{}", key);
+        }
+    }
+
+    // A list keeps insertion order, so the cap must take the *first* N rather
+    // than an arbitrary N -- otherwise the pane shows different data per load.
+    #[test]
+    #[ignore = "requires redis-server; run with: cargo test -- --ignored"]
+    fn a_capped_list_keeps_its_first_items_in_order() {
+        let server = TestRedis::start();
+        seed_big_collections(&server.url(), 500);
+        let mut c = RedisClient::connect(&server.url()).unwrap();
+
+        let loaded = c.get_value("big:list", 3).unwrap();
+        match loaded.value {
+            RedisValue::List(v) => {
+                let got: Vec<String> = v
+                    .iter()
+                    .map(|b| String::from_utf8_lossy(b).into())
+                    .collect();
+                assert_eq!(got, vec!["item-000000", "item-000001", "item-000002"]);
+            }
+            other => panic!("expected a list, got {:?}", other),
+        }
+    }
+
+    // Strings are not collections: the cap must not truncate binary payloads,
+    // which would corrupt them exactly as #82 did.
+    #[test]
+    #[ignore = "requires redis-server; run with: cargo test -- --ignored"]
+    fn a_string_is_never_truncated_by_the_item_cap() {
+        let server = TestRedis::start();
+        let blob: Vec<u8> = (0..4000u32).map(|i| (i % 251) as u8).collect();
+        let mut seed = RedisClient::connect(&server.url()).unwrap();
+        redis::cmd("SET")
+            .arg("blob")
+            .arg(&blob)
+            .query::<()>(&mut seed.connection)
+            .unwrap();
+
+        let loaded = seed.get_value("blob", 10).unwrap();
+        match loaded.value {
+            RedisValue::String(b) => assert_eq!(b, blob, "the string was truncated"),
+            other => panic!("expected a string, got {:?}", other),
+        }
+        assert_eq!(loaded.total_items, None, "a string has no item count");
+    }
+
     // #82: the exact reported sequence -- select a binary key, press `s`, press
     // Enter without typing anything -- grew a 4000-byte float32 blob to 6847
     // bytes of U+FFFD. It must now leave the bytes untouched.
@@ -1245,6 +1423,7 @@ mod tests {
         );
     }
 
+    /// End-to-end: the skipped count must reach the status line the user actually reads.
     #[test]
     #[ignore = "requires redis-server; run with: cargo test -- --ignored"]
     fn refresh_keys_status_line_reports_skipped_keys() {

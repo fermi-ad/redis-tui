@@ -30,6 +30,7 @@ redis-tui [OPTIONS]
 | `--username <USERNAME>` | `REDIS_TUI_USERNAME` | Username for hosts without their own | None |
 | `--password <PASSWORD>` | `REDIS_TUI_PASSWORD` | Password for hosts without their own | None |
 | `-d, --db <DB>` | `REDIS_TUI_DB` | Database for hosts without their own | `0` |
+| `--max-value-items <N>` | `REDIS_TUI_MAX_VALUE_ITEMS` | Most list/set/zset/hash elements fetched per value load | `1000` |
 | `--rate-history <MINUTES>` | `REDIS_TUI_RATE_HISTORY` | Rolling window for the rate chart | `20` |
 | `--rate-avg-window <SECONDS>` | `REDIS_TUI_RATE_AVG_WINDOW` | Sliding average for the plotted rate line | `2` |
 | `--connect-retries <N>` | `REDIS_TUI_CONNECT_RETRIES` | Retries for a host that is not up yet | `5` |
@@ -126,6 +127,25 @@ attempt bounded by `--connect-timeout`. Hosts that never come up are reported an
 the session continues without them; if none come up at all, the run fails.
 
 In multi-host mode, keys from all hosts are aggregated into a single list. If the same key exists on multiple hosts, a collision warning is displayed when selecting it. The status bar shows which host each key belongs to.
+
+### Large Collections
+
+Lists, sets, sorted sets and hashes are read up to `--max-value-items` elements
+(1000 by default) rather than whole. Arrow-key navigation loads the selected
+key automatically, so without a cap, scrolling onto a large key pulls all of it
+into memory on the main thread and the interface stops responding.
+
+When a collection is larger than the cap the value pane says so:
+
+```
+Showing first 1000 of 5000000 — raise --max-value-items to see more
+```
+
+Sets and hashes are read with `SSCAN`/`HSCAN` and stopped at the cap, so the
+server never assembles the whole reply either. Lists and sorted sets take their
+first N in order, so the same elements appear on every load.
+
+Strings are never truncated: a partial binary value is a corrupt one.
 
 ---
 
