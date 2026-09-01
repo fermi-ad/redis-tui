@@ -27,6 +27,17 @@ if ! command -v redis-cli &>/dev/null; then
     exit 1
 fi
 
+# Check for python3. The fixture blobs and streams are packed with struct, and
+# the stream devices are a python script, so a missing interpreter otherwise
+# surfaces as a shell error part-way through loading data.
+if ! command -v python3 &>/dev/null; then
+    echo "ERROR: python3 not found. It generates the binary fixture data and runs"
+    echo "       the live stream devices."
+    echo "  Ubuntu/Debian: sudo apt install python3"
+    echo "  macOS:         brew install python"
+    exit 1
+fi
+
 # ─── Start Redis Node 1 ──────────────────────────────────
 if redis-cli -p "$REDIS_PORT_1" ping &>/dev/null; then
     echo "[*] Redis node 1 already running on port $REDIS_PORT_1"
