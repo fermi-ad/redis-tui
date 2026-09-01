@@ -27,6 +27,17 @@ if ! command -v redis-cli &>/dev/null; then
     exit 1
 fi
 
+# Check for python3. The fixture blobs and streams are packed with struct, and
+# the stream devices are a python script, so a missing interpreter otherwise
+# surfaces as a shell error part-way through loading data.
+if ! command -v python3 &>/dev/null; then
+    echo "ERROR: python3 not found. It generates the binary fixture data and runs"
+    echo "       the live stream devices."
+    echo "  Ubuntu/Debian: sudo apt install python3"
+    echo "  macOS:         brew install python"
+    exit 1
+fi
+
 # ─── Start Redis Node 1 ──────────────────────────────────
 if redis-cli -p "$REDIS_PORT_1" ping &>/dev/null; then
     echo "[*] Redis node 1 already running on port $REDIS_PORT_1"
@@ -264,12 +275,47 @@ echo "  shared:active_users"
 $CLI2 -n 1 SET "db1:node2_key" "This is in database 1 on node 2" >/dev/null
 $CLI2 -n 1 HSET "db1:info" description "DB 1 on node 2" purpose "collision test" >/dev/null
 
+# ─── Live stream devices ─────────────────────────────────
+# Static fixtures cannot exercise the parts of the TUI that only exist while
+# data is arriving: the [l] stream listener, the [i] ingestion rate view, and a
+# plot that moves. These three simulate instrumentation writing waveforms
+# continuously, at rates chosen to straddle what the main loop drains per tick
+# (~400 entries/s), so the fast channel is deliberately past it.
+DEVICE_SCRIPT="$(dirname "$0")/stream-device.py"
+DEVICE_LOG="$(mktemp -t redis-tui-devices.XXXXXX.log)"
+DEVICE_PIDS=()
+
+stop_devices() {
+    if [ ${#DEVICE_PIDS[@]} -gt 0 ]; then
+        kill "${DEVICE_PIDS[@]}" 2>/dev/null || true
+        wait "${DEVICE_PIDS[@]}" 2>/dev/null || true
+    fi
+}
+# The TUI runs in the foreground, so this fires however it ends - quit, Ctrl-C
+# or a crash. Without it the devices outlive the script and keep writing.
+trap stop_devices EXIT INT TERM
+
+start_device() { # name rate samples
+    "$DEVICE_SCRIPT" --port "$REDIS_PORT_1" --stream "device:$1" \
+        --rate "$2" --samples "$3" --maxlen 1000 >>"$DEVICE_LOG" 2>&1 &
+    DEVICE_PIDS+=($!)
+    echo "  device:$1  $2 entries/s  $3 float32 samples"
+}
+
+echo ""
+echo "[*] Starting live stream devices on node 1..."
+start_device slow 10 256
+start_device medium 200 512
+start_device fast 1200 1024
+echo "  log: $DEVICE_LOG"
+
 # ─── Summary ──────────────────────────────────────────────
 echo ""
 echo "=== Test Data Loaded ==="
 echo "Node 1 (port $REDIS_PORT_1) keys in DB 0: $($CLI1 DBSIZE | tr -d '\r')"
 echo "Node 2 (port $REDIS_PORT_2) keys in DB 0: $($CLI2 DBSIZE | tr -d '\r')"
 echo "Collision keys: shared:collision_test, shared:status, shared:active_users"
+echo "Live devices: device:slow, device:medium, device:fast (press [l] to listen, [i] for rate)"
 echo ""
 echo "=== Starting Redis TUI (multi-host) ==="
 echo ""

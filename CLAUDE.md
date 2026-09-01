@@ -25,7 +25,10 @@ docker run -it --rm --network host redis-tui
 
 **Dev environment** (requires `redis-server`, `redis-cli`, `python3`):
 ```bash
-./start-dev.sh    # Starts 2 Redis instances with test data, launches TUI in multi-host mode
+./start-dev.sh    # 2 Redis instances + test data + 3 live stream devices, launches TUI in multi-host mode
+
+# The devices alone (start-dev.sh runs three of these and reaps them on exit):
+./stream-device.py --port 6379 --stream device:test --rate 500 --samples 1024
 ```
 
 ## Architecture
@@ -150,3 +153,6 @@ There is no `tests/` directory: this is a binary-only crate with no lib target, 
 - One flag names where to connect. Connection info is built as `redis::ConnectionInfo`, never by formatting a URL string — a credential interpolated into a URL breaks on `/ # ? @`
 - Never pre-fill the edit popup through `from_utf8_lossy` — it is one-way, and `execute_edit` writes the field straight back. A non-UTF-8 string key opens in binary mode with an empty field instead; gate on `std::str::from_utf8`, never `is_binary()`
 - No value fetch may be unbounded: `get_value` caps collections at `max_value_items` and returns the true total in `LoadedValue`, so the pane can report what is hidden. Sets and hashes go through `SSCAN`/`HSCAN`, never `SMEMBERS`/`HGETALL`
+- `scan_keys` drives the SCAN cursor by hand — never `Cmd::iter`. Its errors arrive through the same `Result` as a UTF-8 decode failure and do not advance the cursor, so treating every `Err` as a skippable key name re-issues the same SCAN forever
+- Nothing reachable from `run_app` may print to stdout or stderr: raw mode owns the alternate screen. Per-host scan failures travel back as `MultiRedisClient::host_errors` and land on the status line. The `eprintln!`s in `from_entries` are fine — they run before raw mode
+- `stream-device.py` simulates an instrumentation device: continuous float32 waveforms via `XADD <key> * source device _ <blob>` plus `XTRIM MAXLEN ~`. It speaks RESP over a stdlib socket — the `redis` python package is not a dependency, and one `redis-cli` per entry cannot hold 1200 entries/s. Phase carries across entries so the waveform is continuous and the FFT view shows a signal rather than a per-entry discontinuity

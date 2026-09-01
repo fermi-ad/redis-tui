@@ -67,10 +67,19 @@ docker run -it --rm --network host \
 
 ### Dev environment
 
-The included `start-dev.sh` script starts two local Redis instances, loads test data (strings, hashes, lists, sets, sorted sets, streams with binary waveforms), and launches the TUI in multi-host mode:
+The included `start-dev.sh` script starts two local Redis instances, loads test data (strings, hashes, lists, sets, sorted sets, streams with binary waveforms), starts three simulated instrumentation devices streaming live waveforms, and launches the TUI in multi-host mode:
 
 ```bash
 ./start-dev.sh
+```
+
+The devices write continuously to `device:slow` (10 entries/s), `device:medium`
+(200/s) and `device:fast` (1200/s), so the stream listener (`l`), ingestion rate
+view (`i`) and live plotting have something moving to show. They are stopped
+when the TUI exits. `stream-device.py` also runs standalone:
+
+```bash
+./stream-device.py --port 6379 --stream device:test --rate 500 --samples 1024
 ```
 
 Requires `redis-server`, `redis-cli`, and `python3` to be installed.
