@@ -152,27 +152,49 @@ impl RedisClient {
     /// Returns the decodable keys plus a count of keys that could not be read back as
     /// UTF-8 strings. Those are unavoidably invisible in a text UI, but the count lets
     /// the caller say so instead of silently showing fewer keys than Redis holds.
+    /// Scan keys matching `pattern`, returning them sorted with the count of
+    /// key names that could not be decoded as UTF-8.
+    ///
+    /// The cursor is driven by hand rather than through `Cmd::iter`. That
+    /// iterator surfaces transport errors through the same `Result` as a decode
+    /// failure, and redis-rs returns them without advancing the cursor and
+    /// without ending iteration - so treating every `Err` as "undecodable key
+    /// name, keep going" re-issued the same SCAN forever and hung the TUI on
+    /// the main thread (#84). Here a failed batch propagates, and only a
+    /// genuine UTF-8 failure increments `skipped`.
     pub fn scan_keys(&mut self, pattern: &str) -> Result<(Vec<String>, usize)> {
-        let iter: redis::Iter<String> = redis::cmd("SCAN")
-            .cursor_arg(0)
-            .arg("MATCH")
-            .arg(pattern)
-            .arg("COUNT")
-            .arg(1000)
-            .clone()
-            .iter(&mut self.connection)
-            .context("Failed to SCAN keys")?;
-
         let mut keys: Vec<String> = Vec::new();
         let mut skipped = 0usize;
-        for result in iter {
-            match result {
-                Ok(key) => keys.push(key),
-                // Almost always a non-UTF-8 key name, which a text UI cannot display.
-                Err(_) => skipped += 1,
+        let mut cursor: u64 = 0;
+
+        loop {
+            let (next, batch): (u64, Vec<Vec<u8>>) = redis::cmd("SCAN")
+                .arg(cursor)
+                .arg("MATCH")
+                .arg(pattern)
+                .arg("COUNT")
+                .arg(1000)
+                .query(&mut self.connection)
+                .context("Failed to SCAN keys")?;
+
+            for raw in batch {
+                match String::from_utf8(raw) {
+                    Ok(key) => keys.push(key),
+                    // A non-UTF-8 key name, which a text UI cannot display.
+                    Err(_) => skipped += 1,
+                }
+            }
+
+            cursor = next;
+            if cursor == 0 {
+                break;
             }
         }
+
         keys.sort();
+        // SCAN may return the same key more than once across batches; that is
+        // normal and must not reach the key list twice (#93).
+        keys.dedup();
         Ok((keys, skipped))
     }
 
@@ -608,7 +630,59 @@ pub struct MultiRedisClient {
     pub key_owner: HashMap<String, usize>,
     /// Keys that exist on multiple hosts (collision warnings).
     pub collisions: Vec<(String, Vec<String>)>,
+    /// Hosts whose last scan failed, as (label, error). Reported on the status
+    /// line rather than printed, which would corrupt the alternate screen.
+    pub host_errors: Vec<(String, String)>,
     pub db: i64,
+}
+
+/// Merge each host's key list into one view: the combined key list, who owns
+/// each key, and the genuine cross-host collisions.
+///
+/// Ownership is first-host-wins. A host listing the same key twice is not a
+/// collision with itself (#93), so each host is recorded at most once per key.
+struct MergedKeys {
+    keys: Vec<String>,
+    key_owner: HashMap<String, usize>,
+    collisions: Vec<(String, Vec<String>)>,
+}
+
+fn merge_host_keys(per_host: &[Vec<String>], labels: &[String]) -> MergedKeys {
+    let mut all_keys: Vec<String> = Vec::new();
+    let mut key_owner: HashMap<String, usize> = HashMap::new();
+    let mut seen: HashMap<String, Vec<usize>> = HashMap::new();
+
+    for (idx, keys) in per_host.iter().enumerate() {
+        for key in keys {
+            let hosts = seen.entry(key.clone()).or_default();
+            if !hosts.contains(&idx) {
+                hosts.push(idx);
+            }
+            if !key_owner.contains_key(key) {
+                key_owner.insert(key.clone(), idx);
+                all_keys.push(key.clone());
+            }
+        }
+    }
+
+    let mut collisions: Vec<(String, Vec<String>)> = seen
+        .iter()
+        .filter(|(_, hosts)| hosts.len() > 1)
+        .map(|(key, hosts)| {
+            (
+                key.clone(),
+                hosts.iter().map(|&i| labels[i].clone()).collect(),
+            )
+        })
+        .collect();
+    collisions.sort_by(|a, b| a.0.cmp(&b.0));
+    all_keys.sort();
+
+    MergedKeys {
+        keys: all_keys,
+        key_owner,
+        collisions,
+    }
 }
 
 impl MultiRedisClient {
@@ -710,6 +784,7 @@ impl MultiRedisClient {
             labels: final_labels,
             key_owner: HashMap::new(),
             collisions: Vec::new(),
+            host_errors: Vec::new(),
             db,
         })
     }
@@ -725,43 +800,34 @@ impl MultiRedisClient {
     /// Scan all hosts, returning the aggregated keys plus the total number of keys
     /// skipped across hosts because they were not valid UTF-8.
     pub fn scan_keys(&mut self, pattern: &str) -> Result<(Vec<String>, usize)> {
-        let mut all_keys: Vec<String> = Vec::new();
-        let mut seen: HashMap<String, Vec<usize>> = HashMap::new();
+        let mut per_host: Vec<Vec<String>> = Vec::with_capacity(self.clients.len());
         let mut total_skipped = 0usize;
         self.key_owner.clear();
         self.collisions.clear();
+        self.host_errors.clear();
 
         for (idx, client) in self.clients.iter_mut().enumerate() {
             match client.scan_keys(pattern) {
                 Ok((keys, skipped)) => {
                     total_skipped += skipped;
-                    for key in keys {
-                        seen.entry(key.clone()).or_default().push(idx);
-                        if !self.key_owner.contains_key(&key) {
-                            self.key_owner.insert(key.clone(), idx);
-                            all_keys.push(key);
-                        }
-                    }
+                    per_host.push(keys);
                 }
                 Err(e) => {
-                    // Log error but continue with other hosts
-                    eprintln!("Error scanning keys on {}: {}", self.labels[idx], e);
+                    // Never print here. While the TUI runs, stdout is the
+                    // alternate screen in raw mode, so an eprintln! draws over
+                    // the interface and cannot be scrolled back (#92). The
+                    // caller puts this on the status line instead.
+                    self.host_errors
+                        .push((self.labels[idx].clone(), e.to_string()));
+                    per_host.push(Vec::new());
                 }
             }
         }
 
-        // Record collisions
-        for (key, hosts) in &seen {
-            if hosts.len() > 1 {
-                let host_names: Vec<String> =
-                    hosts.iter().map(|&i| self.labels[i].clone()).collect();
-                self.collisions.push((key.clone(), host_names));
-            }
-        }
-        self.collisions.sort_by(|a, b| a.0.cmp(&b.0));
-
-        all_keys.sort();
-        Ok((all_keys, total_skipped))
+        let merged = merge_host_keys(&per_host, &self.labels);
+        self.key_owner = merged.key_owner;
+        self.collisions = merged.collisions;
+        Ok((merged.keys, total_skipped))
     }
 
     /// Get the client that owns a key. Falls back to first client.
@@ -1011,6 +1077,15 @@ mod tests {
         }
     }
 
+    impl TestRedis {
+        /// Stop the server while a client is still connected, so a scan fails
+        /// part-way rather than failing to connect at all.
+        fn kill(&mut self) {
+            let _ = self.child.kill();
+            let _ = self.child.wait();
+        }
+    }
+
     impl Drop for TestRedis {
         fn drop(&mut self) {
             let _ = self.child.kill();
@@ -1120,6 +1195,120 @@ mod tests {
 
         assert_eq!(actual_db(&mut client), 0);
         assert_eq!(client.db, 0);
+    }
+
+    // ─── #84 / #92 / #93: scan_keys error handling ───────────
+
+    // #93: SCAN may return the same key twice from one host. Counting that as
+    // a multi-host collision warns the user about a conflict that is not there.
+    #[test]
+    fn one_host_returning_a_key_twice_is_not_a_collision() {
+        let labels = vec!["db1:6379".to_string()];
+        let m = merge_host_keys(&[vec!["a".into(), "a".into(), "b".into()]], &labels);
+
+        assert_eq!(
+            m.keys,
+            vec!["a".to_string(), "b".to_string()],
+            "key listed twice"
+        );
+        assert!(
+            m.collisions.is_empty(),
+            "false collision: {:?}",
+            m.collisions
+        );
+        assert_eq!(m.key_owner.get("a"), Some(&0));
+    }
+
+    #[test]
+    fn the_same_key_on_two_hosts_is_a_collision() {
+        let labels = vec!["db1:6379".to_string(), "db2:6380".to_string()];
+        let m = merge_host_keys(&[vec!["a".into()], vec!["a".into(), "b".into()]], &labels);
+
+        assert_eq!(m.keys, vec!["a".to_string(), "b".to_string()]);
+        assert_eq!(m.collisions.len(), 1);
+        assert_eq!(m.collisions[0].0, "a");
+        assert_eq!(
+            m.collisions[0].1,
+            vec!["db1:6379".to_string(), "db2:6380".to_string()]
+        );
+        // First host wins ownership.
+        assert_eq!(m.key_owner.get("a"), Some(&0));
+        assert_eq!(m.key_owner.get("b"), Some(&1));
+    }
+
+    // Even with duplicates on both sides, a real collision is still reported
+    // once, with each host named once.
+    #[test]
+    fn duplicates_do_not_inflate_a_real_collision() {
+        let labels = vec!["db1:6379".to_string(), "db2:6380".to_string()];
+        let m = merge_host_keys(
+            &[vec!["a".into(), "a".into()], vec!["a".into(), "a".into()]],
+            &labels,
+        );
+        assert_eq!(m.collisions.len(), 1);
+        assert_eq!(m.collisions[0].1.len(), 2, "each host should appear once");
+    }
+
+    // ─── #84: a mid-scan transport error must not loop forever ───
+
+    // The reported hang: redis-rs returns a transport error through the same
+    // Result as a decode error, without advancing the cursor and without ending
+    // the iteration, so the old `for` loop re-issued the same SCAN forever with
+    // no exit. Bounded here so a regression fails the suite instead of hanging
+    // it.
+    #[test]
+    #[ignore = "requires redis-server; run with: cargo test -- --ignored"]
+    fn a_server_dying_mid_scan_returns_an_error_instead_of_looping() {
+        let mut server = TestRedis::start();
+        let url = server.url();
+
+        // More than one SCAN batch, so the failure lands after the first.
+        let mut seed = RedisClient::connect(&url).unwrap();
+        let mut cmd = redis::cmd("MSET");
+        for i in 0..5000 {
+            cmd.arg(format!("key:{:06}", i)).arg(1);
+        }
+        cmd.query::<()>(&mut seed.connection).unwrap();
+        drop(seed);
+
+        let mut client = RedisClient::connect(&url).unwrap();
+        server.kill();
+
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(client.scan_keys("*").is_err());
+        });
+
+        match rx.recv_timeout(std::time::Duration::from_secs(20)) {
+            Ok(errored) => assert!(errored, "a dead server must surface as Err"),
+            Err(_) => panic!("scan_keys did not return within 20s -- it is looping"),
+        }
+    }
+
+    // ─── #92: per-host errors must not be printed ────────────────
+
+    // stdout is the alternate screen while the TUI runs, so an eprintln! from a
+    // background scan draws over the interface. The failure has to travel back
+    // as data instead.
+    #[test]
+    #[ignore = "requires redis-server; run with: cargo test -- --ignored"]
+    fn a_dead_hosts_error_reaches_the_status_line() {
+        let mut server = TestRedis::start();
+        let mut multi = connect_multi(&server.url());
+        let label = multi.labels[0].clone();
+
+        server.kill();
+
+        let mut app = crate::app::App::new();
+        app.refresh_keys(&mut multi);
+
+        assert_eq!(multi.host_errors.len(), 1, "the error should be recorded");
+        assert_eq!(multi.host_errors[0].0, label);
+        assert!(
+            app.status_message.contains(&label),
+            "the user must be told which host failed, got: {}",
+            app.status_message
+        );
     }
 
     // ─── #87: collection fetches must be bounded ─────────────
@@ -1331,23 +1520,20 @@ mod tests {
         );
     }
 
-    /// Documents what a total scan failure currently looks like to `App`.
+    /// A total scan failure must be distinguishable from an empty keyspace.
     ///
-    /// `MultiRedisClient::scan_keys` never returns `Err` - it logs each per-host
-    /// failure with `eprintln!` and returns whatever succeeded - so losing every
-    /// host yields `Ok((vec![], 0))` and the status line reads "Loaded 0 keys".
-    /// An empty keyspace and an unreachable server are indistinguishable, and the
-    /// only account of the failure goes to stderr, over the alternate screen.
+    /// This test previously pinned the opposite: `MultiRedisClient::scan_keys`
+    /// swallowed every per-host failure into an `eprintln!` and returned
+    /// `Ok((vec![], 0))`, so losing every host read as "Loaded 0 keys" and the
+    /// only account of it went to stderr, over the alternate screen. It was
+    /// written to fail once #92 was fixed, which is what happened - the
+    /// assertion below is the updated half.
     ///
-    /// That is #92, not something this change fixes. This test pins the current
-    /// behaviour so fixing #92 fails here and the assertion gets updated
-    /// deliberately rather than the change landing unnoticed.
-    ///
-    /// It also covers the half that IS in scope: a refresh that finds nothing
-    /// must not leave a stale value on screen.
+    /// It also covers the half that was always in scope: a refresh that finds
+    /// nothing must not leave a stale value on screen.
     #[test]
     #[ignore = "requires redis-server; run with: cargo test -- --ignored"]
-    fn total_scan_failure_is_currently_indistinguishable_from_an_empty_keyspace() {
+    fn a_total_scan_failure_is_reported_not_shown_as_an_empty_keyspace() {
         let server = TestRedis::start();
         let url = server.url();
         let mut seed = RedisClient::connect(&url).unwrap();
@@ -1369,12 +1555,11 @@ mod tests {
 
         app.refresh_keys(&mut multi);
         assert!(
-            app.status_message.contains("Loaded 0 keys"),
-            "known #92 behaviour: the host error is swallowed and reported as an \
-             empty keyspace. If this now names the failure, #92 is fixed - update \
-             this test. Got: {}",
+            app.status_message.contains("unreachable"),
+            "a dead host must be named, not reported as an empty keyspace. Got: {}",
             app.status_message
         );
+        assert_eq!(multi.host_errors.len(), 1, "the failure should be recorded");
         assert_eq!(
             app.key_list_state.selected(),
             None,

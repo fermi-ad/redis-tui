@@ -786,16 +786,39 @@ impl App {
                     String::new()
                 };
 
+                // A host that failed to scan is silently absent from the key
+                // list otherwise, which reads as "those keys are gone".
+                let host_note = if client.host_errors.is_empty() {
+                    String::new()
+                } else {
+                    let hosts: Vec<&str> = client
+                        .host_errors
+                        .iter()
+                        .map(|(label, _)| label.as_str())
+                        .collect();
+                    format!(
+                        " ({} host{} unreachable: {})",
+                        hosts.len(),
+                        if hosts.len() == 1 { "" } else { "s" },
+                        hosts.join(", ")
+                    )
+                };
+
                 if collision_count > 0 {
                     self.status_message = format!(
-                        "Loaded {} keys ({} collisions!){}",
+                        "Loaded {} keys ({} collisions!){}{}",
                         self.keys.len(),
                         collision_count,
-                        skipped_note
+                        skipped_note,
+                        host_note
                     );
                 } else {
-                    self.status_message =
-                        format!("Loaded {} keys{}", self.keys.len(), skipped_note);
+                    self.status_message = format!(
+                        "Loaded {} keys{}{}",
+                        self.keys.len(),
+                        skipped_note,
+                        host_note
+                    );
                 }
 
                 // Preserve selection if possible

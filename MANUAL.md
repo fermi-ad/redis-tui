@@ -126,6 +126,16 @@ A host that parses but is not up yet is retried `--connect-retries` times, each
 attempt bounded by `--connect-timeout`. Hosts that never come up are reported and
 the session continues without them; if none come up at all, the run fails.
 
+If a host stops answering mid-session, its scan failure is named on the status
+line rather than printed, which would draw over the interface:
+
+```
+Loaded 42 keys (1 host unreachable: 127.0.0.1:6380)
+```
+
+Its keys are absent from the list while it is down, so the count alone would
+otherwise read as "those keys were deleted".
+
 In multi-host mode, keys from all hosts are aggregated into a single list. If the same key exists on multiple hosts, a collision warning is displayed when selecting it. The status bar shows which host each key belongs to.
 
 ### Large Collections
