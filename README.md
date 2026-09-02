@@ -73,10 +73,22 @@ The included `start-dev.sh` script starts two local Redis instances, loads test 
 ./start-dev.sh
 ```
 
+Both instances run on ports the OS assigns, in their own temporary directories,
+and are shut down when the script exits. It never connects to a Redis it did not
+start, so a server already running on this machine is left alone. The ports it
+picked are printed on startup and in the summary. To pin them instead — handy for
+attaching `redis-cli` — set `REDIS_PORT_1` and `REDIS_PORT_2`; if either is
+already in use the script stops rather than using what is there:
+
+```bash
+REDIS_PORT_1=7001 REDIS_PORT_2=7002 ./start-dev.sh
+```
+
 The devices write continuously to `device:slow` (10 entries/s), `device:medium`
 (200/s) and `device:fast` (1200/s), so the stream listener (`l`), ingestion rate
 view (`i`) and live plotting have something moving to show. They are stopped
-when the TUI exits. `stream-device.py` also runs standalone:
+when the TUI exits. `stream-device.py` also runs standalone, against a server of
+your own:
 
 ```bash
 ./stream-device.py --port 6379 --stream device:test --rate 500 --samples 1024

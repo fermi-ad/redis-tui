@@ -1,15 +1,26 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Both nodes run with persistence off (--save '' --appendonly no).
-# Without it redis writes dump.rdb into whatever directory it was launched
-# from, which is the repo root, and the live tests then adopt that file as
-# their starting dataset - `dir` defaults to the working directory and an
-# existing dump.rdb is loaded at boot whether or not saving is enabled.
-# This is throwaway fixture data that FLUSHALL rebuilds on every run, so
-# there is nothing here worth persisting.
-REDIS_PORT_1=6379
-REDIS_PORT_2=6380
+# Both nodes are started by this script, on ports the OS hands out, into their
+# own data directories, and are killed when it exits.
+#
+# They used to be fixed at 6379/6380 and the script treated a PING answer there
+# as "our node is already up", adopted it, and ran FLUSHALL. On any machine with
+# a system redis-server or valkey on 6379 - which is what `apt install
+# redis-server` gives you, and what the missing-dependency message above tells
+# you to install - that emptied a real server, and its save points wrote the
+# loss straight to disk. See #117.
+#
+# Nothing is adopted now, so there is no FLUSHALL: a server we just started is
+# already empty. Persistence is off (--save '' --appendonly no) and each node
+# gets its own --dir, so no dump.rdb can land in the repo root, where the live
+# tests would otherwise load it as their starting dataset.
+#
+# Set REDIS_PORT_1/REDIS_PORT_2 to pin the ports - useful for attaching redis-cli
+# or a second client - but then they must be free, and anything already there is
+# a fatal error rather than something to take over.
+REDIS_PORT_1="${REDIS_PORT_1:-}"
+REDIS_PORT_2="${REDIS_PORT_2:-}"
 
 echo "=== Redis TUI Dev Environment (Multi-Host) ==="
 
@@ -38,42 +49,136 @@ if ! command -v python3 &>/dev/null; then
     exit 1
 fi
 
-# ─── Start Redis Node 1 ──────────────────────────────────
-if redis-cli -p "$REDIS_PORT_1" ping &>/dev/null; then
-    echo "[*] Redis node 1 already running on port $REDIS_PORT_1"
-else
-    echo "[*] Starting redis node 1 on port $REDIS_PORT_1..."
-    redis-server --port "$REDIS_PORT_1" --daemonize yes --loglevel warning \
-        --save '' --appendonly no
-    sleep 1
-    if ! redis-cli -p "$REDIS_PORT_1" ping &>/dev/null; then
-        echo "ERROR: Failed to start redis node 1"
-        exit 1
-    fi
-    echo "[*] Node 1 started (PID $(redis-cli -p "$REDIS_PORT_1" INFO server | grep process_id | tr -d '\r' | cut -d: -f2))"
-fi
+# ─── Server and device lifecycle ─────────────────────────
+# Everything this script starts is torn down here, however it ends: a clean
+# quit, Ctrl-C, or a failure under `set -e`. The trap is installed before the
+# first server so a failure part-way through startup cannot leak one.
+REDIS_PIDS=()
+REDIS_DIRS=()
+DEVICE_PIDS=()
 
-# ─── Start Redis Node 2 ──────────────────────────────────
-if redis-cli -p "$REDIS_PORT_2" ping &>/dev/null; then
-    echo "[*] Redis node 2 already running on port $REDIS_PORT_2"
-else
-    echo "[*] Starting redis node 2 on port $REDIS_PORT_2..."
-    redis-server --port "$REDIS_PORT_2" --daemonize yes --loglevel warning \
-        --save '' --appendonly no
-    sleep 1
-    if ! redis-cli -p "$REDIS_PORT_2" ping &>/dev/null; then
-        echo "ERROR: Failed to start redis node 2"
-        exit 1
+cleanup() {
+    if [ ${#DEVICE_PIDS[@]} -gt 0 ]; then
+        kill "${DEVICE_PIDS[@]}" 2>/dev/null || true
+        wait "${DEVICE_PIDS[@]}" 2>/dev/null || true
     fi
-    echo "[*] Node 2 started (PID $(redis-cli -p "$REDIS_PORT_2" INFO server | grep process_id | tr -d '\r' | cut -d: -f2))"
-fi
+    if [ ${#REDIS_PIDS[@]} -gt 0 ]; then
+        kill "${REDIS_PIDS[@]}" 2>/dev/null || true
+        wait "${REDIS_PIDS[@]}" 2>/dev/null || true
+    fi
+    if [ ${#REDIS_DIRS[@]} -gt 0 ]; then
+        rm -rf "${REDIS_DIRS[@]}"
+    fi
+}
+trap cleanup EXIT INT TERM
+
+# Ask the OS for a free port by binding :0, reading what it assigned, and
+# releasing it. This is the same trick the live tests use (see TestRedis in
+# src/redis_client.rs), for the same reason: a fixed or sequential range
+# collides with whatever else is on the machine.
+free_port() {
+    python3 -c 'import socket
+s = socket.socket()
+s.bind(("127.0.0.1", 0))
+print(s.getsockname()[1])
+s.close()'
+}
+
+# start_node <label> <env-var-name> <requested-port-or-empty>
+#
+# Sets STARTED_PORT and STARTED_PID, and records the pid and data directory for
+# cleanup. Deliberately not called through $(...): command substitution runs the
+# function in a subshell, where the appends to REDIS_PIDS/REDIS_DIRS would be
+# discarded and the servers would leak.
+STARTED_PORT=""
+STARTED_PID=""
+start_node() {
+    local label="$1" var="$2" pinned="$3" port dir pid waited owner info attempt=0
+
+    dir="$(mktemp -d -t redis-tui-dev.XXXXXX)"
+    REDIS_DIRS+=("$dir")
+
+    while :; do
+        if [ -n "$pinned" ]; then
+            port="$pinned"
+        else
+            port="$(free_port)"
+        fi
+
+        redis-server --port "$port" --dir "$dir" --loglevel warning \
+            --save '' --appendonly no &>"$dir/server.log" &
+        pid=$!
+
+        # Wait for it to answer, or to exit - a taken port fails almost at once.
+        #
+        # A PING answer is not enough on its own. If something else already owns
+        # the port, our child dies but the incumbent answers the ping, and we
+        # would adopt a server we did not start - the #117 bug, reintroduced
+        # through the back door. So compare the responder's process_id with the
+        # pid we spawned and only accept our own.
+        # The INFO must not run bare: under `set -e` with pipefail, redis-cli
+        # exiting non-zero while the server is still binding would abort the
+        # whole script instead of retrying. Guarding it with `if` suppresses that.
+        waited=0
+        owner=""
+        while [ "$waited" -lt 50 ]; do
+            if info="$(redis-cli -p "$port" INFO server 2>/dev/null)"; then
+                owner="$(printf '%s' "$info" | tr -d '\r' \
+                    | sed -n 's/^process_id:\(.*\)$/\1/p')"
+            else
+                owner=""
+            fi
+            if [ -n "$owner" ]; then
+                if [ "$owner" = "$pid" ]; then
+                    REDIS_PIDS+=("$pid")
+                    STARTED_PORT="$port"
+                    STARTED_PID="$pid"
+                    return 0
+                fi
+                break   # someone else's server is on this port
+            fi
+            kill -0 "$pid" 2>/dev/null || break
+            sleep 0.1
+            waited=$((waited + 1))
+        done
+
+        kill "$pid" 2>/dev/null || true
+        wait "$pid" 2>/dev/null || true
+
+        # A pinned port that is taken is a hard error. Taking it over is exactly
+        # the behaviour #117 removed, so there is no retry and no adoption.
+        if [ -n "$pinned" ]; then
+            echo "ERROR: $label could not start on port $port."
+            if [ -n "$owner" ] && [ "$owner" != "$pid" ]; then
+                echo "       Another server (pid $owner) is already listening there."
+                echo "       This script will not take over a server it did not start."
+            fi
+            echo "       Port $port is pinned by $var; unset it to let the OS pick a free one."
+            sed -n '1,20p' "$dir/server.log" >&2 || true
+            exit 1
+        fi
+
+        attempt=$((attempt + 1))
+        if [ "$attempt" -ge 5 ]; then
+            echo "ERROR: could not start $label after $attempt attempts on OS-assigned ports."
+            sed -n '1,20p' "$dir/server.log" >&2 || true
+            exit 1
+        fi
+    done
+}
+
+echo "[*] Starting redis node 1..."
+start_node "node 1" REDIS_PORT_1 "$REDIS_PORT_1"
+REDIS_PORT_1="$STARTED_PORT"
+echo "[*] Node 1 up on port $REDIS_PORT_1 (PID $STARTED_PID)"
+
+echo "[*] Starting redis node 2..."
+start_node "node 2" REDIS_PORT_2 "$REDIS_PORT_2"
+REDIS_PORT_2="$STARTED_PORT"
+echo "[*] Node 2 up on port $REDIS_PORT_2 (PID $STARTED_PID)"
 
 CLI1="redis-cli -p $REDIS_PORT_1"
 CLI2="redis-cli -p $REDIS_PORT_2"
-
-echo "[*] Flushing existing data on both nodes..."
-$CLI1 FLUSHALL >/dev/null
-$CLI2 FLUSHALL >/dev/null
 
 # ═══════════════════════════════════════════════════════════
 # NODE 1 DATA
@@ -283,17 +388,12 @@ $CLI2 -n 1 HSET "db1:info" description "DB 1 on node 2" purpose "collision test"
 # (~400 entries/s), so the fast channel is deliberately past it.
 DEVICE_SCRIPT="$(dirname "$0")/stream-device.py"
 DEVICE_LOG="$(mktemp -t redis-tui-devices.XXXXXX.log)"
-DEVICE_PIDS=()
 
-stop_devices() {
-    if [ ${#DEVICE_PIDS[@]} -gt 0 ]; then
-        kill "${DEVICE_PIDS[@]}" 2>/dev/null || true
-        wait "${DEVICE_PIDS[@]}" 2>/dev/null || true
-    fi
-}
-# The TUI runs in the foreground, so this fires however it ends - quit, Ctrl-C
-# or a crash. Without it the devices outlive the script and keep writing.
-trap stop_devices EXIT INT TERM
+# DEVICE_PIDS and the trap that reaps them are declared with the server
+# lifecycle above. The TUI runs in the foreground, so `cleanup` fires however
+# this ends - quit, Ctrl-C or a crash - and stops the devices before the nodes
+# they write to. Do not install a second trap here: it would replace that one
+# and leak both servers.
 
 start_device() { # name rate samples
     "$DEVICE_SCRIPT" --port "$REDIS_PORT_1" --stream "device:$1" \

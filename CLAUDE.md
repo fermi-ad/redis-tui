@@ -27,6 +27,9 @@ docker run -it --rm --network host redis-tui
 ```bash
 ./start-dev.sh    # 2 Redis instances + test data + 3 live stream devices, launches TUI in multi-host mode
 
+# Ports are OS-assigned and printed on startup; pin them only if you need to:
+REDIS_PORT_1=7001 REDIS_PORT_2=7002 ./start-dev.sh
+
 # The devices alone (start-dev.sh runs three of these and reaps them on exit):
 ./stream-device.py --port 6379 --stream device:test --rate 500 --samples 1024
 ```
@@ -156,4 +159,5 @@ There is no `tests/` directory: this is a binary-only crate with no lib target, 
 - `scan_keys` drives the SCAN cursor by hand — never `Cmd::iter`. Its errors arrive through the same `Result` as a UTF-8 decode failure and do not advance the cursor, so treating every `Err` as a skippable key name re-issues the same SCAN forever
 - Nothing reachable from `run_app` may print to stdout or stderr: raw mode owns the alternate screen. Per-host scan failures travel back as `MultiRedisClient::host_errors` and land on the status line. The `eprintln!`s in `from_entries` are fine — they run before raw mode
 - `stream-device.py` simulates an instrumentation device: continuous float32 waveforms via `XADD <key> * source device _ <blob>` plus `XTRIM MAXLEN ~`. It speaks RESP over a stdlib socket — the `redis` python package is not a dependency, and one `redis-cli` per entry cannot hold 1200 entries/s. Phase carries across entries so the waveform is continuous and the FFT view shows a signal rather than a per-entry discontinuity
+- `start-dev.sh` only ever talks to servers it started itself, on OS-assigned ports (the `TestRedis` trick: bind `127.0.0.1:0`, read the port, release it) in their own `--dir`, killed by one `trap cleanup EXIT INT TERM`. It once treated a `PING` answer on 6379/6380 as its own node and ran `FLUSHALL`, which emptied whatever system Redis or Valkey was there (#117). A `PING` reply is not proof of ownership — the readiness check compares `INFO server`'s `process_id` against the pid it spawned, because when the port is taken the child dies and the incumbent answers instead. Never reintroduce an adopt-if-running path, and never `FLUSHALL`
 - The stream drain is bounded by time, never by message count: `drained += 1` per message capped throughput at 400 messages/s regardless of entries carried, and a producer writing entries individually above that grew the channel without bound. `drain_listener` coalesces a listener's whole queue into one batch under a 10ms budget
