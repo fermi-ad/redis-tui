@@ -39,7 +39,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     match app.input_mode {
         InputMode::Filter => draw_filter_popup(frame, app, size),
         InputMode::Confirm => draw_confirm_popup(frame, app, size),
-        InputMode::Help => draw_help_popup(frame, app, size),
+        InputMode::Help => crate::help::draw(frame, app, size),
         InputMode::Edit => draw_edit_popup(frame, app, size),
         InputMode::PlotLimit => draw_plot_limit_popup(frame, app, size),
         InputMode::SignalGen => draw_signal_gen_popup(frame, app, size),
@@ -47,7 +47,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     }
 }
 
-fn draw_title_bar(frame: &mut Frame, app: &App, area: Rect) {
+fn draw_title_bar(frame: &mut Frame, app: &mut App, area: Rect) {
     let url_text = app.url_display();
     let version = format!("v{} ", env!("CARGO_PKG_VERSION"));
     let version_width = version.len() as u16;
@@ -58,6 +58,11 @@ fn draw_title_bar(frame: &mut Frame, app: &App, area: Rect) {
         .constraints([Constraint::Min(0), Constraint::Length(version_width)])
         .split(area);
 
+    // Click targets: " Redis TUI " + " " + url + "  " then the two buttons.
+    let help_x = area.x + 11 + 1 + url_text.chars().count() as u16 + 2;
+    let fits = |x: u16, w: u16| x + w <= h_split[0].x + h_split[0].width;
+    app.help_button = fits(help_x, 7).then_some((help_x, 7));
+    app.quit_button = fits(help_x + 8, 7).then_some((help_x + 8, 7));
     let title = Line::from(vec![
         Span::styled(
             " Redis TUI ",
@@ -69,7 +74,9 @@ fn draw_title_bar(frame: &mut Frame, app: &App, area: Rect) {
         Span::raw(" "),
         Span::styled(url_text, Style::default().fg(Color::DarkGray)),
         Span::raw("  "),
-        Span::styled("[?]Help [q]Quit", Style::default().fg(Color::DarkGray)),
+        Span::styled("[?]Help", Style::default().fg(Color::Cyan)),
+        Span::raw(" "),
+        Span::styled("[q]Quit", Style::default().fg(Color::Cyan)),
     ]);
     frame.render_widget(Paragraph::new(title), h_split[0]);
     frame.render_widget(
@@ -1275,252 +1282,6 @@ fn draw_confirm_popup(frame: &mut Frame, app: &App, area: Rect) {
     frame.render_widget(popup, popup_area);
 }
 
-fn draw_help_popup(frame: &mut Frame, app: &App, area: Rect) {
-    let max_height = area.height.saturating_sub(2).min(50);
-    let popup_area = centered_rect(72, max_height, area);
-    frame.render_widget(Clear, popup_area);
-
-    let dim = Style::default().fg(Color::DarkGray);
-    let key_style = Style::default()
-        .fg(Color::Green)
-        .add_modifier(Modifier::BOLD);
-
-    let help_text = vec![
-        Line::from(Span::styled(
-            "Redis TUI — Controls Reference",
-            Style::default()
-                .fg(Color::Yellow)
-                .add_modifier(Modifier::BOLD),
-        )),
-        Line::from(""),
-        // --- Navigation ---
-        Line::from(vec![Span::styled(
-            "Navigation",
-            Style::default()
-                .fg(Color::Cyan)
-                .add_modifier(Modifier::BOLD),
-        )]),
-        Line::from(vec![
-            Span::styled("  Up/Down  ", key_style),
-            Span::raw("Navigate keys, scroll value view, or select"),
-        ]),
-        Line::from(Span::styled("            Signal/FFT sub-plot", dim)),
-        Line::from(vec![
-            Span::styled("  Enter    ", key_style),
-            Span::raw("Load the selected key's value"),
-        ]),
-        Line::from(vec![
-            Span::styled("  Tab      ", key_style),
-            Span::raw("Cycle focus: Key List → Value View → Data Plot"),
-        ]),
-        Line::from(vec![
-            Span::styled("  Shift+Tab", key_style),
-            Span::raw("  Cycle focus in reverse"),
-        ]),
-        Line::from(vec![
-            Span::styled("  0-9      ", key_style),
-            Span::raw("Switch to Redis database 0-9"),
-        ]),
-        Line::from(""),
-        // --- Key Operations ---
-        Line::from(vec![Span::styled(
-            "Key Operations",
-            Style::default()
-                .fg(Color::Cyan)
-                .add_modifier(Modifier::BOLD),
-        )]),
-        Line::from(vec![
-            Span::styled("  /        ", key_style),
-            Span::raw("Filter keys by glob pattern (e.g. sensor:*)"),
-        ]),
-        Line::from(vec![
-            Span::styled("  r        ", key_style),
-            Span::raw("Refresh the key list from Redis"),
-        ]),
-        Line::from(vec![
-            Span::styled("  s        ", key_style),
-            Span::raw("Edit the selected key's value"),
-        ]),
-        Line::from(vec![
-            Span::styled("  n        ", key_style),
-            Span::raw("Create a new key (←/→ to choose type)"),
-        ]),
-        Line::from(vec![
-            Span::styled("  d        ", key_style),
-            Span::raw("Delete the selected key (y/n to confirm)"),
-        ]),
-        Line::from(vec![
-            Span::styled("  R        ", key_style),
-            Span::raw("Rename the selected key"),
-        ]),
-        Line::from(vec![
-            Span::styled("  z        ", key_style),
-            Span::raw("Set TTL on the selected key (-1 to persist)"),
-        ]),
-        Line::from(""),
-        // --- Edit Mode ---
-        Line::from(vec![Span::styled(
-            "Edit Mode",
-            Style::default()
-                .fg(Color::Cyan)
-                .add_modifier(Modifier::BOLD),
-        )]),
-        Line::from(vec![
-            Span::styled("  Tab      ", key_style),
-            Span::raw("Next field"),
-        ]),
-        Line::from(vec![
-            Span::styled("  Shift+Tab", key_style),
-            Span::raw("  Previous field"),
-        ]),
-        Line::from(vec![
-            Span::styled("  Enter    ", key_style),
-            Span::raw("Submit (multi-entry types stay open)"),
-        ]),
-        Line::from(vec![
-            Span::styled("  Esc      ", key_style),
-            Span::raw("Cancel / close edit popup"),
-        ]),
-        Line::from(vec![
-            Span::styled("  Ctrl+B   ", key_style),
-            Span::raw("Toggle binary encoding mode"),
-        ]),
-        Line::from(vec![
-            Span::styled("  Ctrl+T   ", key_style),
-            Span::raw("Cycle binary data type (Int8..Float64)"),
-        ]),
-        Line::from(vec![
-            Span::styled("  Ctrl+E   ", key_style),
-            Span::raw("Toggle endianness (LE/BE)"),
-        ]),
-        Line::from(Span::styled(
-            "            Paste supported in all input fields",
-            dim,
-        )),
-        Line::from(""),
-        // --- Streams ---
-        Line::from(vec![Span::styled(
-            "Streams",
-            Style::default()
-                .fg(Color::Cyan)
-                .add_modifier(Modifier::BOLD),
-        )]),
-        Line::from(vec![
-            Span::styled("  l        ", key_style),
-            Span::raw("Toggle live stream listener (up to 4 keys)"),
-        ]),
-        Line::from(vec![
-            Span::styled("  i        ", key_style),
-            Span::raw("Toggle ingestion rate view (stream + listening only)"),
-        ]),
-        Line::from(Span::styled(
-            "            Shows entries/s chart with gap detection",
-            dim,
-        )),
-        Line::from(vec![
-            Span::styled("  w        ", key_style),
-            Span::raw("Toggle signal generator (sine/square/saw/tri)"),
-        ]),
-        Line::from(Span::styled(
-            "            ←/→ to select wave type and data type",
-            dim,
-        )),
-        Line::from(""),
-        // --- Data Plot ---
-        Line::from(vec![Span::styled(
-            "Data Plot",
-            Style::default()
-                .fg(Color::Cyan)
-                .add_modifier(Modifier::BOLD),
-        )]),
-        Line::from(vec![
-            Span::styled("  p        ", key_style),
-            Span::raw("Toggle key in plot (up to 4, FIFO eviction)"),
-        ]),
-        Line::from(vec![
-            Span::styled("  t / T    ", key_style),
-            Span::raw("Cycle data type forward / backward"),
-        ]),
-        Line::from(vec![
-            Span::styled("  e        ", key_style),
-            Span::raw("Toggle endianness: Little ↔ Big"),
-        ]),
-        Line::from(vec![
-            Span::styled("  a        ", key_style),
-            Span::raw("Auto-fit axis limits to data"),
-        ]),
-        Line::from(vec![
-            Span::styled("  x        ", key_style),
-            Span::raw("Set plot axis limits (X + per-key Y)"),
-        ]),
-        Line::from(vec![
-            Span::styled("  f        ", key_style),
-            Span::raw("Toggle FFT frequency analysis (split view)"),
-        ]),
-        Line::from(vec![
-            Span::styled("  g        ", key_style),
-            Span::raw("Toggle FFT scale: linear ↔ log"),
-        ]),
-        Line::from(""),
-        // --- Mouse ---
-        Line::from(vec![Span::styled(
-            "Mouse",
-            Style::default()
-                .fg(Color::Cyan)
-                .add_modifier(Modifier::BOLD),
-        )]),
-        Line::from(vec![
-            Span::styled("  Click    ", key_style),
-            Span::raw("Select a key in the key list"),
-        ]),
-        Line::from(vec![
-            Span::styled("  Scroll   ", key_style),
-            Span::raw("Key list / value view: scroll content"),
-        ]),
-        Line::from(Span::styled(
-            "            Data plot: zoom in/out at cursor",
-            dim,
-        )),
-        Line::from(vec![
-            Span::styled("  Drag     ", key_style),
-            Span::raw("Pan the plot (X and Y axes)"),
-        ]),
-        Line::from(vec![
-            Span::styled("  Shift    ", key_style),
-            Span::raw("Hold for native text selection + right-click copy"),
-        ]),
-        Line::from(""),
-        // --- General ---
-        Line::from(vec![Span::styled(
-            "General",
-            Style::default()
-                .fg(Color::Cyan)
-                .add_modifier(Modifier::BOLD),
-        )]),
-        Line::from(vec![
-            Span::styled("  ?        ", key_style),
-            Span::raw("Toggle this help screen"),
-        ]),
-        Line::from(vec![
-            Span::styled("  q / Esc  ", key_style),
-            Span::raw("Quit (or close popup)"),
-        ]),
-    ];
-
-    let total_lines = help_text.len() as u16;
-    let inner_height = popup_area.height.saturating_sub(2); // border top + bottom
-    let max_scroll = total_lines.saturating_sub(inner_height);
-    let scroll = app.help_scroll.min(max_scroll);
-
-    let popup = Paragraph::new(help_text).scroll((scroll, 0)).block(
-        Block::default()
-            .borders(Borders::ALL)
-            .border_style(Style::default().fg(HIGHLIGHT_COLOR))
-            .title(" Help — Up/Down to scroll, ? or Esc to close "),
-    );
-    frame.render_widget(popup, popup_area);
-}
-
 fn draw_plot_limit_popup(frame: &mut Frame, app: &App, area: Rect) {
     let popup_height = (app.edit_fields.len() as u16) + 5; // fields + title + blank + buttons + borders
     let popup_area = centered_rect(50, popup_height, area);
@@ -2179,12 +1940,12 @@ mod tests {
     fn title_bar_contains_version() {
         let backend = TestBackend::new(80, 3);
         let mut terminal = Terminal::new(backend).unwrap();
-        let app = App::new();
+        let mut app = App::new();
 
         terminal
             .draw(|frame| {
                 let area = Rect::new(0, 0, 80, 1);
-                draw_title_bar(frame, &app, area);
+                draw_title_bar(frame, &mut app, area);
             })
             .unwrap();
 
@@ -2227,12 +1988,12 @@ mod tests {
     fn title_bar_contains_help_and_quit() {
         let backend = TestBackend::new(80, 3);
         let mut terminal = Terminal::new(backend).unwrap();
-        let app = App::new();
+        let mut app = App::new();
 
         terminal
             .draw(|frame| {
                 let area = Rect::new(0, 0, 80, 1);
-                draw_title_bar(frame, &app, area);
+                draw_title_bar(frame, &mut app, area);
             })
             .unwrap();
 
