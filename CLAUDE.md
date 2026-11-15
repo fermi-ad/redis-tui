@@ -17,7 +17,7 @@ cargo clippy                   # Lint
 cargo fmt                      # Format
 ```
 
-**Docker:**
+**Docker:** CI publishes `adregistry.fnal.gov/instrumentation/redis-tui:<version>` and `:latest` on every push to main after CI passes (`docker-publish.yml`); don't push by hand. MANUAL.md's pictures (`docs/images/*.png`) are tmux captures of the image against a throwaway `redis:7-alpine` container plus `stream-device.py`.
 ```bash
 docker build -t redis-tui .
 docker run -it --rm --network host redis-tui
@@ -36,13 +36,14 @@ REDIS_PORT_1=7001 REDIS_PORT_2=7002 ./start-dev.sh
 
 ## Architecture
 
-Five source modules in `src/`, single binary:
+Six source modules in `src/`, single binary:
 
 - **`main.rs`** — CLI parsing, terminal setup/teardown (raw mode, mouse capture, bracketed paste), event loop (50ms tick), background thread lifecycle (`StreamListener`, `SignalGenerator`), input routing by `InputMode`, mouse event handling (click-to-select, scroll per-pane, shift-bypass)
 - **`app.rs`** — All application state (`App` struct), Redis data loading, plot/FFT computation, edit operations, multi-key slot management with per-key data types, ingestion rate tracking (`RateTracker`)
 - **`data.rs`** — Binary data encoding/decoding (`DataType` × `Endianness` → `Vec<f64>`), hex formatting, value parsing. `is_binary()` only checks for control chars — do NOT use it to gate binary display for `_`-prefixed stream fields or when a numeric DataType is selected
 - **`hosts.rs`** — Turns each `--hosts` entry (`host`, `host:port`, or a full `redis://` URL) into a `redis::ConnectionInfo` plus a credential-free display label. Reports every bad entry at once
 - **`redis_client.rs`** — `RedisClient` (one host, carrying its `ConnectionInfo` and label) and `MultiRedisClient` (aggregated multi-host with collision detection), all Redis commands
+- **`help.rs`** — the help window (`?`, `F1`, or a click on `[?]Help` in the title bar): content (`SECTIONS`: panels, keys, clicks, colours, the keys that write), drawing and scrolling. Tests keep every row within 76 cells so it fits 80×24. When a key or click changes, change its handler, `help.rs` and MANUAL.md's "Controls at a Glance" together
 - **`ui.rs`** — ratatui rendering: layout (key list / value view / data plot), charts (signal + FFT + ingestion rate), popups (filter, edit, help, confirm, signal gen, plot settings), crosshair drawing, per-key Y-axis labels and hover values
 
 ### Data Flow
@@ -116,6 +117,9 @@ Each `PlotSlot` stores its own `data_type` and `endianness`. Pressing `t`/`T`/`e
 The event loop routes keyboard input based on `app.input_mode`: `Normal`, `Filter`, `Confirm`, `Help`, `Edit`, `PlotLimit`, `SignalGen`. Each has a dedicated handler function in `main.rs`.
 
 ### Mouse Handling
+
+- **Help open**: `handle_mouse_event` gives the help every mouse event first: the wheel scrolls, a click closes it.
+- **Title bar**: `draw_title_bar` records `app.help_button` / `app.quit_button` (x, width on row 0); a click opens the help / quits.
 
 - **Click on key list**: Maps row to key index via `key_list_area` + `key_list_state.offset()`, sets `pending_click_load` flag (processed in main loop with client access)
 - **Scroll**: Over key list = viewport scroll (offset only, no selection change). Over value view = content scroll. Over plot = zoom.

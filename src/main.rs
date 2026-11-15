@@ -1,5 +1,6 @@
 mod app;
 mod data;
+mod help;
 mod hosts;
 mod redis_client;
 mod ui;
@@ -28,7 +29,10 @@ use std::time::{Duration, Instant};
 #[derive(Parser, Debug)]
 #[command(
     name = "redis-tui",
-    about = "A Redis TUI client inspired by Redis Insight"
+    about = "A Redis TUI client inspired by Redis Insight",
+    after_help = "In the TUI: ? or F1 (or click [?]Help) lists every key, click and colour.\n\
+                  Keys that write to Redis: s edit, n new, R rename, z TTL, d delete,\n\
+                  w signal generator. q quits."
 )]
 struct Args {
     /// Redis hosts: `host`, `host:port`, or a full `redis://` URL.
@@ -455,18 +459,7 @@ fn run_app(
                     match app.input_mode {
                         InputMode::Filter => handle_filter_input(&mut app, client, key.code),
                         InputMode::Confirm => handle_confirm_input(&mut app, client, key.code),
-                        InputMode::Help => match key.code {
-                            KeyCode::Up => {
-                                app.help_scroll = app.help_scroll.saturating_sub(1);
-                            }
-                            KeyCode::Down => {
-                                app.help_scroll = app.help_scroll.saturating_add(1);
-                            }
-                            _ => {
-                                app.help_scroll = 0;
-                                app.input_mode = InputMode::Normal;
-                            }
-                        },
+                        InputMode::Help => handle_help_input(&mut app, key.code),
                         InputMode::Edit => {
                             handle_edit_input(&mut app, client, key.code, key.modifiers)
                         }
@@ -709,10 +702,7 @@ fn handle_normal_input(
         KeyCode::Char('q') | KeyCode::Esc => {
             app.running = false;
         }
-        KeyCode::Char('?') => {
-            app.help_scroll = 0;
-            app.input_mode = InputMode::Help;
-        }
+        KeyCode::Char('?') | KeyCode::F(1) => open_help(app),
         KeyCode::Tab => {
             if modifiers.contains(KeyModifiers::SHIFT) {
                 app.active_panel = app.active_panel.prev();
@@ -861,6 +851,33 @@ fn handle_normal_input(
 
         _ => {}
     }
+}
+
+fn open_help(app: &mut App) {
+    app.help_scroll = 0;
+    app.input_mode = InputMode::Help;
+}
+
+/// Keys while the help is open: scroll, or close with Esc, ?, F1 or q.
+fn handle_help_input(app: &mut App, code: KeyCode) {
+    let page = app.help_page.max(1) as i32;
+    match code {
+        KeyCode::Esc | KeyCode::Char('?') | KeyCode::F(1) | KeyCode::Char('q') => {
+            app.help_scroll = 0;
+            app.input_mode = InputMode::Normal;
+        }
+        KeyCode::Up | KeyCode::Char('k') => help::scroll(app, -1),
+        KeyCode::Down | KeyCode::Char('j') => help::scroll(app, 1),
+        KeyCode::PageUp => help::scroll(app, -page),
+        KeyCode::PageDown => help::scroll(app, page),
+        KeyCode::Home => app.help_scroll = 0,
+        KeyCode::End => help::scroll(app, i32::MAX / 2),
+        _ => {}
+    }
+}
+
+fn in_button(button: Option<(u16, u16)>, col: u16, row: u16) -> bool {
+    button.is_some_and(|(x, w)| row == 0 && col >= x && col < x + w)
 }
 
 fn handle_filter_input(app: &mut App, client: &mut MultiRedisClient, code: KeyCode) {
@@ -1173,6 +1190,29 @@ fn handle_mouse_event(app: &mut App, mouse: MouseEvent) {
     let col = mouse.column;
     let row = mouse.row;
 
+    // The help takes the mouse while open: the wheel scrolls, a click closes.
+    if app.input_mode == InputMode::Help {
+        match mouse.kind {
+            MouseEventKind::ScrollUp => help::scroll(app, -3),
+            MouseEventKind::ScrollDown => help::scroll(app, 3),
+            MouseEventKind::Down(_) => handle_help_input(app, KeyCode::Esc),
+            _ => {}
+        }
+        return;
+    }
+    if app.input_mode == InputMode::Normal
+        && mouse.kind == MouseEventKind::Down(crossterm::event::MouseButton::Left)
+    {
+        if in_button(app.help_button, col, row) {
+            open_help(app);
+            return;
+        }
+        if in_button(app.quit_button, col, row) {
+            app.running = false;
+            return;
+        }
+    }
+
     match mouse.kind {
         MouseEventKind::Moved | MouseEventKind::Drag(_) => {
             app.mouse_x = col;
@@ -1341,6 +1381,70 @@ mod tests {
         app.signal_gen_fields[3].1 = samples.to_string();
         app.signal_gen_fields[4].1 = rate.to_string();
         app
+    }
+
+    fn mouse(kind: MouseEventKind, column: u16, row: u16) -> MouseEvent {
+        MouseEvent {
+            kind,
+            column,
+            row,
+            modifiers: KeyModifiers::NONE,
+        }
+    }
+
+    #[test]
+    fn help_opens_from_keys_and_the_title_button_and_closes() {
+        use crossterm::event::MouseButton;
+        let mut app = App::new();
+        let mut term = Terminal::new(ratatui::backend::TestBackend::new(80, 24)).unwrap();
+        term.draw(|f| ui::draw(f, &mut app)).unwrap();
+        let (hx, _) = app.help_button.expect("[?]Help drawn");
+        let row: String = (0..80)
+            .map(|x| term.backend().buffer()[(x, 0)].symbol().to_string())
+            .collect();
+        assert_eq!(&row[hx as usize..hx as usize + 7], "[?]Help", "{row}");
+        handle_mouse_event(
+            &mut app,
+            mouse(MouseEventKind::Down(MouseButton::Left), hx + 1, 0),
+        );
+        assert_eq!(app.input_mode, InputMode::Help);
+        term.draw(|f| ui::draw(f, &mut app)).unwrap();
+        handle_mouse_event(&mut app, mouse(MouseEventKind::ScrollDown, 10, 10));
+        assert_eq!(app.help_scroll, 3);
+        handle_help_input(&mut app, KeyCode::PageDown);
+        assert_eq!(app.help_scroll, 3 + 22);
+        handle_mouse_event(
+            &mut app,
+            mouse(MouseEventKind::Down(MouseButton::Left), 10, 10),
+        );
+        assert_eq!(app.input_mode, InputMode::Normal);
+        for close in [
+            KeyCode::Esc,
+            KeyCode::Char('?'),
+            KeyCode::F(1),
+            KeyCode::Char('q'),
+        ] {
+            open_help(&mut app);
+            handle_help_input(&mut app, KeyCode::Char('x'));
+            assert_eq!(app.input_mode, InputMode::Help, "other keys leave it open");
+            handle_help_input(&mut app, close);
+            assert_eq!(app.input_mode, InputMode::Normal);
+            assert!(app.running, "closing help does not quit");
+        }
+        let (qx, _) = app.quit_button.expect("[q]Quit drawn");
+        handle_mouse_event(
+            &mut app,
+            mouse(MouseEventKind::Down(MouseButton::Left), qx, 0),
+        );
+        assert!(!app.running);
+    }
+
+    #[test]
+    fn long_help_names_the_in_app_help_and_the_writes() {
+        let help = Args::command().render_long_help().to_string();
+        for word in ["F1", "[?]Help", "s edit", "d delete", "REDIS_TUI_HOSTS"] {
+            assert!(help.contains(word), "--help misses {word}:\n{help}");
+        }
     }
 
     fn submit(app: &mut App) {

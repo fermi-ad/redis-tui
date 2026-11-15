@@ -345,6 +345,8 @@ pub struct App {
     pub plot_focus: PlotFocus, // which sub-plot is selected when FFT is on
     pub plot_visible: bool,
     pub help_scroll: u16,
+    /// Help window height last frame (for PgUp/PgDn).
+    pub help_page: u16,
 
     // Plot viewport (x-axis panning/zooming)
     pub plot_x_min: f64,
@@ -369,6 +371,9 @@ pub struct App {
 
     // Panel area rects (set during draw)
     pub key_list_area: Option<(u16, u16, u16, u16)>, // x, y, w, h
+    /// `[?]Help` / `[q]Quit` in the title bar (x, w on row 0).
+    pub help_button: Option<(u16, u16)>,
+    pub quit_button: Option<(u16, u16)>,
     pub value_view_area: Option<(u16, u16, u16, u16)>, // x, y, w, h
     pub signal_chart_area: Option<(u16, u16, u16, u16)>, // x, y, w, h (inner)
     pub fft_chart_area: Option<(u16, u16, u16, u16)>,
@@ -461,6 +466,7 @@ impl App {
             plot_focus: PlotFocus::Signal,
             plot_visible: false,
             help_scroll: 0,
+            help_page: 0,
 
             plot_x_min: 0.0,
             plot_x_max: 0.0, // 0 means auto (full range)
@@ -481,6 +487,8 @@ impl App {
             hover_in_fft: false,
 
             key_list_area: None,
+            help_button: None,
+            quit_button: None,
             value_view_area: None,
             signal_chart_area: None,
             fft_chart_area: None,

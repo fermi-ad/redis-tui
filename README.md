@@ -21,7 +21,7 @@ A terminal UI client for Redis inspired by Redis Insight, built with Rust and [r
 - Multi-host support — connect to multiple Redis instances and aggregate keys
 - Panic-safe terminal restoration
 
-For detailed usage instructions, see [MANUAL.md](MANUAL.md).
+**User guide: [MANUAL.md](MANUAL.md)** (how to start it, pictures, every key and click, colours, what writes). In the TUI, press `?` or `F1` or click **[?]Help**.
 
 ## Installation
 
@@ -155,7 +155,7 @@ See [MANUAL.md](MANUAL.md#command-line-options) for the full flag reference.
 | `g` | Toggle FFT log scale |
 | `a` | Reset plot to auto limits |
 | `x` | Plot settings |
-| `?` | Help |
+| `?` / `F1` | Help (or click **[?]Help**) |
 | `q` / `Esc` | Quit |
 
 See [MANUAL.md](MANUAL.md) for full keybinding reference and detailed usage guide.
