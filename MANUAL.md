@@ -1,5 +1,37 @@
 # Redis TUI Manual
 
+This manual describes **redis-tui 2.0.7**.
+
+redis-tui is a terminal browser for Redis in the style of Redis Insight. It
+lists the keys of one or more Redis servers, shows each value, decodes binary
+waveforms in streams as numbers, plots up to four keys with an FFT, and
+watches live streams with their ingestion rate.
+
+## Starting it
+
+- **clx29 shell:** `redis-tui --hosts host[:port] ...` (personal shell command
+  in `~/.tuibashrc`; it runs the image below). It is not on W5.
+- **Anywhere with podman or docker:**
+
+  ```bash
+  podman run --rm -it --network=host adregistry.fnal.gov/instrumentation/redis-tui:latest \
+    redis-tui --hosts bidaqt:6379
+  ```
+
+  With no `--hosts` it connects to `127.0.0.1:6379`. `redis-tui --help` lists
+  every option and its environment variable ([below](#command-line-options)).
+
+redis-tui talks to Redis only, not EPICS.
+
+## Help
+
+Press `?` or `F1`, or click **[?]Help** in the title bar. The help lists every
+panel, popup, key, click and colour, and which keys write to Redis. Scroll with
+`↑` `↓`, `PgUp` `PgDn`, `Home` `End` or the wheel; close it with `Esc`, `?`,
+`F1`, `q` or a click. It fits an 80×24 terminal.
+
+![Help at 80x24](docs/images/06-help.png)
+
 ## Table of Contents
 
 1. [Command Line Options](#command-line-options)
@@ -15,6 +47,10 @@
 11. [Signal Generator](#signal-generator)
 12. [Mouse Controls](#mouse-controls)
 13. [Multi-Host Mode](#multi-host-mode)
+14. [Controls at a Glance](#controls-at-a-glance)
+15. [Colours](#colours)
+16. [What Writes to Redis](#what-writes-to-redis)
+17. [Troubleshooting](#troubleshooting)
 
 ---
 
@@ -180,7 +216,23 @@ The interface consists of three panels:
 - **Value View** (right): Displays key metadata (type, TTL, encoding, size) and the formatted value.
 - **Data Plot** (bottom): Visualizes data as waveforms. When FFT is enabled, the plot splits into a signal view (top) and frequency view (bottom).
 - **Status Bar** (bottom line): Shows the current operation status, active database, and host info.
-- **Title Bar** (top): Shows the app name, help/quit hints, and version.
+- **Title Bar** (top): Shows the app name, the hosts, the clickable **[?]Help** and **[q]Quit**, and the version.
+
+The key list with a hash selected:
+
+![Key list and value view](docs/images/01-keys.png)
+
+A live stream (`l`) decoded as float32 (`t`) and plotted (`p`):
+
+![Stream and plot](docs/images/02-stream-plot.png)
+
+The same with the FFT (`f`):
+
+![Plot with FFT](docs/images/03-fft.png)
+
+The ingestion rate view (`i`) of the stream being listened to:
+
+![Ingestion rate view](docs/images/04-rate.png)
 
 ---
 
@@ -193,7 +245,7 @@ The interface consists of three panels:
 | `Up` / `Down` | Navigate keys (Key List panel) or scroll value (Value View panel) |
 | `Enter` | Load the selected key's value |
 | `0-9` | Switch to Redis database 0-9 |
-| `?` | Open help overlay (scroll with Up/Down, press any key to close) |
+| `?` / `F1` | Open the help (scroll with Up/Down, PgUp/PgDn, Home/End, wheel; close with Esc, ?, F1, q or a click) |
 | `q` / `Esc` | Quit the application |
 
 ### Data Plot Navigation (when Data Plot panel is focused)
@@ -472,10 +524,13 @@ When running:
 
 ## Mouse Controls
 
-Mouse interaction works within the Data Plot panel:
-
 | Action | Effect |
 |--------|--------|
+| Click a key | Select it and load its value |
+| Click **[?]Help** / **[q]Quit** | Open the help / quit |
+| Wheel over the key list | Scroll the list (the selection stays) |
+| Wheel over the value view | Scroll the value |
+| Hold Shift | Mouse goes to the terminal: select and copy text |
 | Click + drag | Pan the plot viewport |
 | Scroll up | Zoom in (centered on cursor position) |
 | Scroll down | Zoom out (centered on cursor position) |
@@ -501,3 +556,108 @@ If the same key name exists on multiple hosts:
 ### Host Labels
 
 Host labels are derived from the entry (the `host:port` portion, with auth stripped). These appear in the status bar and collision warnings to identify which host a key belongs to.
+
+---
+
+## Controls at a Glance
+
+The same rows as the in-app help.
+
+| Key / click | Action |
+|---|---|
+| `?` / `F1` / click **[?]Help** | Help |
+| `Tab` / `Shift-Tab` | Next / previous panel: key list, value view, data plot |
+| `0`-`9` | Switch to Redis database 0-9 |
+| `q` / `Esc` / click **[q]Quit** | Quit (`Esc` in a popup closes the popup) |
+| `↑` `↓`, `Enter` | Act on the panel with the cyan border |
+| `↑` `↓` (key list) | Select a key and load its value |
+| `Enter` (key list) | Load the selected key again |
+| `/` | Filter by glob, e.g. `sensor:*` (`Enter`, `Esc`) |
+| `r` | Reload the key list |
+| `↑` `↓` (value view) | Scroll |
+| `t` / `T` | Data type forward / back (Int8 ... Float64) |
+| `e` | Endianness little / big |
+| `i` | Ingestion rate view (a stream you listen to) |
+| `l` | Listen live on the stream (up to 4); `l` again stops |
+| `w` | Signal generator on the stream; `w` again stops |
+| `p` | Plot the selected key on / off (up to 4) |
+| `↑` `↓` (data plot) | Signal / FFT plot (with FFT on) |
+| `a` | Autoscale |
+| `x` | Type the limits (X and each key's Y) |
+| `f` | FFT on / off |
+| `g` | FFT scale linear / log |
+| wheel / drag (plot) | Zoom at the pointer / pan |
+| hover (plot) | Read the value under the pointer |
+| `Tab` / `Shift-Tab` (popup) | Next / previous field |
+| `←` `→` (popup) | New key: its type; signal generator: wave, data type |
+| `Enter` (popup) | Apply (list, set, stream entries stay open) |
+| `Esc` (popup) | Cancel |
+| `Ctrl-B` (edit) | Binary encoding on / off |
+| `Ctrl-T` `Ctrl-E` (edit, binary) | Data type / endianness |
+| `y` / `n` | Confirm / cancel a delete |
+| `s` `n` `R` `z` `d` | Edit, new key, rename, TTL, delete (see below) |
+
+The letter keys work from any panel.
+
+---
+
+## Colours
+
+| Colour | Meaning |
+|---|---|
+| green `STR` | string |
+| blue `LIST` | list |
+| magenta `SET` | set |
+| yellow `ZSET` | sorted set |
+| red `HASH` | hash |
+| cyan `STRM` | stream |
+| green `L` / red `W` | Listening / signal generator writing |
+| coloured `P` | Plotted, in its trace colour |
+| yellow `!` | The same key name on two hosts |
+| red `⚠` | Stream gaps, or a rate that lags |
+| status bar green / red | Connected / not connected |
+| cyan border | The panel that has the keys |
+| grey | Hints; no data |
+
+There is one fixed palette (no theme switch). Plots are drawn in braille
+characters, so they work in any terminal; there is no pixel mode.
+
+---
+
+## What Writes to Redis
+
+| Key | Write |
+|---|---|
+| `s` | Edit the selected key's value |
+| `n` | New key |
+| `R` | Rename the selected key |
+| `z` | Set the TTL (`-1` keeps it for ever) |
+| `d` | Delete the selected key |
+| `w` | Signal generator: `XADD` + `XTRIM` until stopped |
+
+`s`, `n`, `R` and `z` open a popup: nothing is written until `Enter`. `d` asks
+`y` / `n` first:
+
+![Delete asks first](docs/images/05-confirm.png)
+
+`w` writes for as long as it runs; `w` again stops it, and quitting stops every
+generator. Everything else only reads.
+
+---
+
+## Troubleshooting
+
+- **"Connecting…" then an error.** The host is not reachable from where the
+  container runs: check the host name and port, and that the container has
+  `--network=host`. `--connect-retries` and `--connect-timeout` wait longer for
+  a host that is still booting.
+- **No keys.** Check the database (`0`-`9`, or `--db`) and the filter (`/`,
+  then `Enter` with an empty pattern).
+- **A collection shows only part of its elements.** Values are capped at
+  `--max-value-items` (default 1000); the value view says how many are hidden.
+- **Numbers look wrong.** Pick the data type with `t` / `T` and the byte order
+  with `e`.
+- **Terminal too small.** Panels shrink; the help scrolls. 80×24 works.
+- **Mouse does nothing, or text cannot be selected.** The terminal must pass
+  mouse events (xterm, Ghostty do; over ssh use `ssh -t`). Hold Shift to select
+  text with the terminal instead.
