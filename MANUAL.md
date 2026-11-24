@@ -1,6 +1,6 @@
 # Redis TUI Manual
 
-This manual describes **redis-tui 2.0.7**.
+This manual describes **redis-tui 2.0.8**.
 
 redis-tui is a terminal browser for Redis in the style of Redis Insight. It
 lists the keys of one or more Redis servers, shows each value, decodes binary
