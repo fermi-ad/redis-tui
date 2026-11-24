@@ -1,5 +1,5 @@
 # Build stage - use Alpine + musl for fully static binary
-FROM rust:latest AS builder
+FROM rust:1.97-trixie AS builder
 
 RUN apt-get update && apt-get install -y musl-tools && rm -rf /var/lib/apt/lists/*
 RUN rustup target add x86_64-unknown-linux-musl aarch64-unknown-linux-musl
@@ -26,7 +26,7 @@ RUN touch src/main.rs \
     && cp target/$(cat /tmp/rust-target)/release/redis-tui /redis-tui
 
 # Runtime stage - scratch since the binary is fully static
-FROM alpine:latest AS runtime
+FROM alpine:3.24 AS runtime
 
 COPY --from=builder /redis-tui /usr/local/bin/redis-tui
 
